@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Check the production dependency graph of the private Windows editor before publishing."""
+
+import argparse
+from pathlib import Path
+import subprocess
+
+
+# Shared settings, protocol types and the HTTP client are also used by the editor.
+# Check implementations rather than matching every dependency with 'agent' in its name.
+EXCLUDED = {
+    "agent_ui", "agent_servers", "edit_prediction_ui", "copilot_ui",
+    "livekit_client", "livekit", "libwebrtc",
+}
+REQUIRED = {"zed", "workspace", "editor", "remote_connection", "lsp", "auto_update", "gpui-component"}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("checkout", type=Path, help="prepared Zedbench Cargo workspace")
+    parser.add_argument("--no-default-features", action="store_true")
+    parser.add_argument("--features", help="same Zed features passed to cargo build")
+    args = parser.parse_args()
+    command = ["cargo", "tree", "--locked", "--target", "x86_64-pc-windows-msvc", "-p", "zed",
+               "-e", "normal,build", "--prefix", "none", "--format", "{p}|{f}"]
+    if args.no_default_features:
+        command.append("--no-default-features")
+    if args.features:
+        command.extend(["--features", args.features])
+    output = subprocess.check_output(command, cwd=args.checkout, text=True, encoding="utf-8")
+    packages = {line.split()[0] for line in output.splitlines() if line.strip()}
+    errors = []
+    for line in output.splitlines():
+        package, _, feature_text = line.partition("|")
+        if package.startswith(("zed v", "client v")):
+            forbidden = {"ai", "collab", "full"} if package.startswith("zed v") else {"accounts"}
+            enabled = set(feature_text.removesuffix(" (*)").strip().split(","))
+            if unwanted := enabled & forbidden:
+                errors.append(f"{package}: forbidden features: {', '.join(sorted(unwanted))}")
+    if present := EXCLUDED & packages:
+        errors.append("Unwanted implementations linked: " + ", ".join(sorted(present)))
+    if missing := REQUIRED - packages:
+        errors.append("Missing editor components: " + ", ".join(sorted(missing)))
+    if errors:
+        raise SystemExit("\n".join(dict.fromkeys(errors)))
+    print("Windows dependency graph passed. Account actions and startup still require a runtime check.")
+
+
+if __name__ == "__main__":
+    main()

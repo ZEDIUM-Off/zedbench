@@ -44,6 +44,12 @@ impl std::fmt::Display for MissingDependencyError {
 }
 
 impl std::error::Error for MissingDependencyError {}
+const PRIVATE_WINDOWS_FEED: Option<&str> = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+    option_env!("ZEDIUM_PRIVATE_UPDATE_ORIGIN")
+} else {
+    None
+};
+
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const REMOTE_SERVER_CACHE_LIMIT: usize = 5;
@@ -279,7 +285,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
         let updater = AutoUpdater::new(version, client, cx);
 
         let poll_for_updates = ReleaseChannel::try_global(cx)
-            .map(|channel| channel.poll_for_updates())
+            .map(|channel| channel.poll_for_updates() || PRIVATE_WINDOWS_FEED.is_some())
             .unwrap_or(false);
 
         if option_env!("ZED_UPDATE_EXPLANATION").is_none()
@@ -323,7 +329,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 
     if !ReleaseChannel::try_global(cx)
-        .map(|channel| channel.poll_for_updates())
+        .map(|channel| channel.poll_for_updates() || PRIVATE_WINDOWS_FEED.is_some())
         .unwrap_or(false)
     {
         return;
@@ -756,8 +762,23 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+        let fetched_release_data = if let Some(origin) = PRIVATE_WINDOWS_FEED {
+            let origin = http_client::Url::parse(origin)?;
+            anyhow::ensure!(origin.scheme() == "https" && origin.host_str().is_some(), "private updates require HTTPS");
+            let url = origin.join("/windows/x86_64/latest")?;
+            let mut response = client.get(url.as_str(), Default::default(), false).await?;
+            anyhow::ensure!(response.status().is_success(), "private feed returned {}", response.status());
+            let mut body = Vec::new();
+            response.body_mut().take(4097).read_to_end(&mut body).await?;
+            anyhow::ensure!(body.len() <= 4096, "private release metadata is too large");
+            let release: ReleaseAsset = serde_json::from_slice(&body)?;
+            let version = Version::parse(&release.version)?;
+            let expected = origin.join(&format!("/zedium-{version}-windows-x86_64.exe"))?;
+            anyhow::ensure!(release.url == expected.as_str(), "unexpected private installer URL");
+            release
+        } else {
+            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?
+        };
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
         let newer_version = Self::check_if_fetched_version_is_newer(
@@ -1081,7 +1102,7 @@ async fn download_release(
 ) -> Result<()> {
     let mut target_file = File::create(&target_path).await?;
 
-    let mut response = client.get(&release.url, Default::default(), true).await?;
+    let mut response = client.get(&release.url, Default::default(), PRIVATE_WINDOWS_FEED.is_none()).await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to download update: {:?}",

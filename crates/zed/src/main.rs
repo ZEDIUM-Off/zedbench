@@ -259,7 +259,15 @@ fn main() {
         return;
     }
 
-    let restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
+    let mut profile = args.user_data_dir.clone();
+    if cfg!(target_os = "windows") && option_env!("ZEDIUM_PRIVATE_UPDATE_ORIGIN").is_some() && profile.is_none() {
+        let Ok(local) = std::env::var("LOCALAPPDATA") else {
+            eprintln!("ZEDIUM Private needs LOCALAPPDATA or --user-data-dir");
+            return;
+        };
+        profile = Some(format!(r"{local}\ZEDIUM Private\Profile"));
+    }
+    let restart_arguments = if let Some(directory) = profile.as_deref() {
         let directory = paths::set_custom_data_dir(directory);
         vec![
             std::ffi::OsString::from("--user-data-dir"),
@@ -305,7 +313,7 @@ fn main() {
     let version = option_env!("ZED_BUILD_ID");
     let app_commit_sha =
         option_env!("ZED_COMMIT_SHA").map(|commit_sha| AppCommitSha::new(commit_sha.to_string()));
-    let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), version, app_commit_sha.clone());
+    let app_version = AppVersion::load(option_env!("ZEDIUM_PRIVATE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), version, app_commit_sha.clone());
 
     if args.system_specs {
         let system_specs = system_specs::SystemSpecs::new_stateless(

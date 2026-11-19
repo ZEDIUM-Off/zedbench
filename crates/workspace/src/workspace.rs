@@ -7056,7 +7056,7 @@ impl Workspace {
         {
             return;
         }
-        window.set_window_title(&title);
+        window.set_window_title(&format!("Zedbench — {title}"));
         SystemWindowTabController::update_tab_title(
             cx,
             window.window_handle().window_id(),

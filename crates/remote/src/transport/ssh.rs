@@ -1023,7 +1023,7 @@ impl SshRemoteConnection {
         cx: &mut AsyncApp,
     ) -> Result<Arc<RelPath>> {
         let version_str = match release_channel {
-            ReleaseChannel::Dev => "build".to_string(),
+            ReleaseChannel::Dev => "d2a4fb6".to_string(),
             _ => version.to_string(),
         };
         let binary_name = format!(

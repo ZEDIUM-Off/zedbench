@@ -163,6 +163,10 @@ impl Settings for ProxySettings {
     }
 }
 
+#[cfg(not(feature = "accounts"))]
+pub fn init(_: &Arc<Client>, _: &mut App) {}
+
+#[cfg(feature = "accounts")]
 pub fn init(client: &Arc<Client>, cx: &mut App) {
     let client = Arc::downgrade(client);
     cx.on_action({

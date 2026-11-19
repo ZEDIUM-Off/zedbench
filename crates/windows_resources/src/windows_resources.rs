@@ -21,7 +21,7 @@ fn git_sha() -> Option<String> {
 
 fn product_version() -> String {
     let commit_sha = git_sha();
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let pkg_version = option_env!("ZEDIUM_PRIVATE_VERSION").map(str::to_owned).unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
     let channel = std::env::var("RELEASE_CHANNEL").unwrap_or_else(|_| "dev".into());
     let build_id = std::env::var("GITHUB_RUN_NUMBER").ok();
 
@@ -47,7 +47,7 @@ pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
         "stable" => ("app-icon.ico", "Zed"),
         "preview" => ("app-icon-preview.ico", "Zed Preview"),
         "nightly" => ("app-icon-nightly.ico", "Zed Nightly"),
-        _ => ("app-icon-dev.ico", "Zed Dev"),
+        _ => ("app-icon-dev.ico", "Zedbench"),
     };
     let icon = std::path::PathBuf::from(ICON_DIR).join(icon_filename);
     let icon_escaped = icon.to_string_lossy().replace('\\', "\\\\");
@@ -59,7 +59,7 @@ pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
         String::new()
     };
 
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let pkg_version = option_env!("ZEDIUM_PRIVATE_VERSION").map(str::to_owned).unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
     let product_version = product_version();
     let mut version_parts = pkg_version
         .split('.')
@@ -100,7 +100,7 @@ BEGIN
             VALUE "FileVersion", "{pkg_version}\0"
             VALUE "ProductName", "{product_name}\0"
             VALUE "ProductVersion", "{product_version}\0"
-            VALUE "CompanyName", "Zed Industries, Inc.\0"
+            VALUE "CompanyName", "ZEDIUM-Off\0"
             VALUE "LegalCopyright", "Copyright 2022 - 2025 Zed Industries, Inc.\0"
         END
     END

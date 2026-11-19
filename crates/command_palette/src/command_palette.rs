@@ -928,6 +928,9 @@ pub fn humanize_action_name(name: &str) -> String {
         }
     }
 
+    if result.starts_with("zed: ") {
+        result.insert_str(3, "bench");
+    }
     result
 }
 
@@ -954,6 +957,7 @@ mod tests {
 
     #[test]
     fn test_humanize_action_name() {
+        assert_eq!(humanize_action_name("zed::About"), "zedbench: about");
         assert_eq!(
             humanize_action_name("editor::GoToDefinition"),
             "editor: go to definition"

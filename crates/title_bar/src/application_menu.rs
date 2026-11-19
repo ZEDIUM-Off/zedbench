@@ -256,7 +256,7 @@ impl ApplicationMenu {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        self.pending_menu_open = Some(action.0.clone());
+        self.pending_menu_open = Some(if action.0 == "Zed" { "Zedbench".to_owned() } else { action.0.clone() });
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -525,7 +525,7 @@ mod tests {
 
         cx.update(|cx| {
             cx.set_menus(vec![
-                Menu::new("Zed").items([MenuItem::action(
+                Menu::new("Zedbench").items([MenuItem::action(
                     "Settings",
                     OpenApplicationMenu(String::new()),
                 )]),
@@ -537,7 +537,7 @@ mod tests {
 
         let zed_handle = cx.update(|window, cx| {
             let zed_handle = app_menu.read_with(cx, |app_menu, _| {
-                menu_entry(&app_menu.entries, "Zed").handle.clone()
+                menu_entry(&app_menu.entries, "Zedbench").handle.clone()
             });
             zed_handle.show(window, cx);
             zed_handle

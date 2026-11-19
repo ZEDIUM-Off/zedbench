@@ -749,7 +749,7 @@ fn probe_script() -> String {
 /// like `linux_bubblewrap::is_available`, the answers can't realistically
 /// change while Zed runs. Failures are deliberately *not* cached so a user
 /// who installs `bwrap` (or lifts a user-namespace restriction) after seeing
-/// the error can retry the command without restarting Zed.
+/// the error can retry the command without restarting Zedbench.
 async fn probe_environment(wsl_exe: &Path, distro: Option<&str>) -> Result<EnvironmentProbe> {
     static CACHE: OnceLock<Mutex<HashMap<Option<String>, EnvironmentProbe>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -854,7 +854,7 @@ fn parse_probe_output(stdout: &str) -> Result<EnvironmentProbe> {
 /// Successful resolutions are cached per `(distro, channel, version)` for the
 /// life of the process — once provisioned, the path won't change. Failures are
 /// not cached, so a user who installs `curl` (or fixes networking) after an
-/// error can retry without restarting Zed.
+/// error can retry without restarting Zedbench.
 async fn ensure_wsl_zed_helper(
     wsl_exe: &Path,
     distro: Option<&str>,

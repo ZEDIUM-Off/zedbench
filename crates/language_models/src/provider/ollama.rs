@@ -915,7 +915,7 @@ impl ConfigurationView {
           .mb_2()
           .child(
               Label::new(
-                  format!("You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed.")
+                  format!("You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zedbench.")
               )
               .size(LabelSize::Small)
               .color(Color::Muted),

@@ -1,0 +1,3 @@
+[submodule "components/gpui-kit"]
+	path = components/gpui-kit
+	url = https://github.com/ZEDIUM-Off/gpui-kit.git

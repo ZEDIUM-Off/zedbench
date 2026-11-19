@@ -208,6 +208,7 @@ members = [
     "crates/streaming_diff",
     "crates/sum_tree",
     "crates/svg_preview",
+    "crates/story_canvas",
     "crates/syntax_theme",
     "crates/system_specs",
     "crates/tab_switcher",
@@ -274,12 +275,15 @@ members = [
     "tooling/xtask",
 ]
 default-members = ["crates/zed"]
+exclude = ["components/gpui-kit"]
 
 [workspace.package]
 publish = false
 edition = "2024"
 
 [workspace.dependencies]
+gpui-component-story = { path = "components/gpui-kit/crates/story", default-features = false }
+gpui-kit = { path = "components/gpui-kit/crates/kit" }
 
 #
 # Workspace member crates
@@ -483,6 +487,7 @@ sqlez_macros = { path = "crates/sqlez_macros" }
 streaming_diff = { path = "crates/streaming_diff" }
 sum_tree = { path = "crates/sum_tree" }
 svg_preview = { path = "crates/svg_preview" }
+story_canvas = { path = "crates/story_canvas" }
 syntax_theme = { path = "crates/syntax_theme" }
 system_specs = { path = "crates/system_specs" }
 tab_switcher = { path = "crates/tab_switcher" }

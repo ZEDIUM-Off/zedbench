@@ -1188,6 +1188,12 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
+    #[cfg(not(feature = "ai"))]
+    fn agent_panel_font_section() -> [SettingsPageItem; 0] {
+        []
+    }
+
+    #[cfg(feature = "ai")]
     fn agent_panel_font_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Agent Panel Font"),
@@ -2981,8 +2987,8 @@ fn editor_page() -> SettingsPage {
         ]
     }
 
-    fn toolbar_section() -> [SettingsPageItem; 6] {
-        [
+    fn toolbar_section() -> Vec<SettingsPageItem> {
+        vec![
             SettingsPageItem::SectionHeader("Toolbar"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Breadcrumbs",
@@ -3059,6 +3065,7 @@ fn editor_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            #[cfg(feature = "ai")]
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Agent Review",
                 description: "Show agent review buttons in the editor toolbar.",
@@ -3112,8 +3119,8 @@ fn editor_page() -> SettingsPage {
         ]
     }
 
-    fn vim_settings_section() -> [SettingsPageItem; 14] {
-        [
+    fn vim_settings_section() -> Vec<SettingsPageItem> {
+        vec![
             SettingsPageItem::SectionHeader("Vim"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Default Mode",
@@ -3246,6 +3253,7 @@ fn editor_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            #[cfg(feature = "ai")]
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Edit Predictions in Normal Mode",
                 description: "Whether edit predictions are shown in normal mode. By default, edit predictions are only shown in insert and replace modes.",
@@ -4184,8 +4192,8 @@ fn search_and_files_page() -> SettingsPage {
 }
 
 fn window_and_layout_page() -> SettingsPage {
-    fn status_bar_section() -> [SettingsPageItem; 13] {
-        [
+    fn status_bar_section() -> Vec<SettingsPageItem> {
+        vec![
             SettingsPageItem::SectionHeader("Status Bar"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Project Panel Button",
@@ -4349,6 +4357,7 @@ fn window_and_layout_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            #[cfg(feature = "ai")]
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Edit Prediction Button",
                 description: "Show the edit prediction button in the status bar.",
@@ -4436,8 +4445,8 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn title_bar_section() -> [SettingsPageItem; 12] {
-        [
+    fn title_bar_section() -> Vec<SettingsPageItem> {
+        vec![
             SettingsPageItem::SectionHeader("Title Bar"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Branch Status Icon",
@@ -4554,6 +4563,7 @@ fn window_and_layout_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            #[cfg(any(feature = "ai", feature = "collab"))]
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Sign In",
                 description: "Show the sign in button in the titlebar.",
@@ -4592,6 +4602,7 @@ fn window_and_layout_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
+            #[cfg(any(feature = "ai", feature = "collab"))]
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show User Picture",
                 description: "Show user picture in the titlebar.",
@@ -6998,6 +7009,12 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
+    #[cfg(not(feature = "collab"))]
+    fn collaboration_panel_section() -> [SettingsPageItem; 0] {
+        []
+    }
+
+    #[cfg(feature = "collab")]
     fn collaboration_panel_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Collaboration Panel"),
@@ -7069,6 +7086,12 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
+    #[cfg(not(feature = "ai"))]
+    fn agent_panel_section() -> [SettingsPageItem; 0] {
+        []
+    }
+
+    #[cfg(feature = "ai")]
     fn agent_panel_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Agent Panel"),

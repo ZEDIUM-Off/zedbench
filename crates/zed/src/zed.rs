@@ -1601,6 +1601,7 @@ fn open_about_window(cx: &mut App) {
         message: SharedString,
         commit: Option<SharedString>,
         full_version: SharedString,
+        upstream_version: SharedString,
     }
 
     impl AboutWindow {
@@ -1629,6 +1630,9 @@ fn open_about_window(cx: &mut App) {
                 message,
                 commit,
                 full_version,
+                // The zed crate keeps the version of the upstream Zed release
+                // Zedbench is based on; ZEDIUM_PRIVATE_VERSION is Zedbench's own.
+                upstream_version: format!("Zed {}", env!("CARGO_PKG_VERSION")).into(),
             }
         }
 
@@ -1636,11 +1640,14 @@ fn open_about_window(cx: &mut App) {
             let content = match self.commit.as_ref() {
                 Some(commit) => {
                     format!(
-                        "{}\nCommit: {}\nVersion: {}",
-                        self.message, commit, self.full_version
+                        "{}\nCommit: {}\nVersion: {}\nBased on: {}",
+                        self.message, commit, self.full_version, self.upstream_version
                     )
                 }
-                None => format!("{}\nVersion: {}", self.message, self.full_version),
+                None => format!(
+                    "{}\nVersion: {}\nBased on: {}",
+                    self.message, self.full_version, self.upstream_version
+                ),
             };
             cx.write_to_clipboard(ClipboardItem::new_string(content));
             window.remove_window();
@@ -1688,7 +1695,15 @@ fn open_about_window(cx: &mut App) {
                                     .color(Color::Muted)
                                     .size(LabelSize::XSmall),
                             )
-                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small)),
+                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small))
+                            .child(
+                                Label::new("Based on")
+                                    .color(Color::Muted)
+                                    .size(LabelSize::XSmall),
+                            )
+                            .child(
+                                Label::new(self.upstream_version.clone()).size(LabelSize::Small),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -1763,7 +1778,7 @@ fn open_about_window(cx: &mut App) {
 
     let window_size = Size {
         width: px(440.),
-        height: px(300.),
+        height: px(340.),
     };
 
     cx.open_window(

@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 gpui.workspace = true
 gpui-component-story.workspace = true
+gpui-ai-gallery.workspace = true
 gpui-kit.workspace = true
 language.workspace = true
 multi_buffer.workspace = true

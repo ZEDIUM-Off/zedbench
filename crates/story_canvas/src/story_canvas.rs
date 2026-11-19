@@ -22,9 +22,19 @@ actions!(
 pub const STORY_EXTENSION: &str = "gpui-story";
 const MAX_STORY_BYTES: usize = 64 * 1024;
 
+#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum Library {
+    #[default]
+    GpuiKit,
+    GpuiAi,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoryFile {
+    #[serde(default)]
+    library: Library,
     story: String,
 }
 
@@ -89,17 +99,31 @@ pub fn open(
             pane.activate_item(index, !side, !side, window, cx);
             return;
         }
-        // Kit's globals are only needed once a story is shown, so Zedbench
-        // pays for them on first use rather than at startup.
-        gpui_component_story::init_embedded(cx);
+        // The libraries' globals are only needed once a story is shown, so
+        // Zedbench pays for them on first use rather than at startup.
+        init_libraries(cx);
         let view = cx.new(|cx| StoryCanvas::new(source, window, cx));
         pane.add_item(Box::new(view), !side, !side, None, window, cx);
     });
 }
 
+fn init_libraries(cx: &mut App) {
+    if cx.has_global::<LibrariesInitialized>() {
+        return;
+    }
+    gpui_component_story::init_embedded(cx);
+    // After Kit, which already ran gpui_component::init.
+    gpui_ai_gallery::init_embedded(cx);
+    cx.set_global(LibrariesInitialized);
+}
+
+struct LibrariesInitialized;
+
+impl gpui::Global for LibrariesInitialized {}
+
 struct StoryCanvas {
     source: Entity<Buffer>,
-    story: Result<(SharedString, Entity<Root>), SharedString>,
+    story: Result<(Library, SharedString, Entity<Root>), SharedString>,
     focus: FocusHandle,
     _edits: Subscription,
 }
@@ -122,8 +146,8 @@ impl StoryCanvas {
     }
 
     fn load(&mut self, source: &Entity<Buffer>, window: &mut Window, cx: &mut Context<Self>) {
-        let name = match parse(source.read(cx)) {
-            Ok(name) => name,
+        let (library, name) = match parse(source.read(cx)) {
+            Ok(file) => (file.library, file.story),
             Err(error) => {
                 self.story = Err(error);
                 cx.notify();
@@ -132,36 +156,54 @@ impl StoryCanvas {
         };
         // Keep the mounted story, and its interaction state, across edits
         // that do not change which story the file names.
-        if let Ok((current, _)) = &self.story
+        if let Ok((current_library, current, _)) = &self.story
+            && *current_library == library
             && current.eq_ignore_ascii_case(&name)
         {
             return;
         }
-        self.story = match gpui_component_story::open_story(&name, window, cx) {
-            Some(container) => {
-                let root = cx.new(|cx| Root::new(container, window, cx));
-                Ok((name.into(), root))
-            }
-            None => Err(format!(
-                "Unknown story {name:?}. Known stories: {}",
-                gpui_component_story::catalog()
-                    .iter()
-                    .map(|(title, _)| *title)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-            .into()),
+        self.story = match library {
+            Library::GpuiKit => match gpui_component_story::open_story(&name, window, cx) {
+                Some(container) => {
+                    let root = cx.new(|cx| Root::new(container, window, cx));
+                    Ok((library, name.into(), root))
+                }
+                None => Err(format!(
+                    "Unknown GPUI Kit story {name:?}. Known stories: {}",
+                    gpui_component_story::catalog()
+                        .iter()
+                        .map(|(title, _)| *title)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into()),
+            },
+            Library::GpuiAi => match name.trim().parse::<gpui_ai_gallery::StoryId>() {
+                Ok(id) => {
+                    let gallery = gpui_ai_gallery::embedded_story(id, cx);
+                    let root = cx.new(|cx| Root::new(gallery, window, cx));
+                    Ok((library, id.title().into(), root))
+                }
+                Err(error) => Err(format!(
+                    "{error}. Known gpui-ai stories: {}",
+                    gpui_ai_gallery::StoryId::ALL
+                        .iter()
+                        .map(|id| id.slug())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into()),
+            },
         };
         cx.notify();
     }
 }
 
-fn parse(buffer: &Buffer) -> Result<String, SharedString> {
+fn parse(buffer: &Buffer) -> Result<StoryFile, SharedString> {
     if buffer.len() > MAX_STORY_BYTES {
         return Err("Story file exceeds 64 KiB".into());
     }
     serde_json::from_str::<StoryFile>(&buffer.text())
-        .map(|file| file.story)
         .map_err(|error| format!("Invalid GPUI story: {error}").into())
 }
 
@@ -172,7 +214,7 @@ impl Render for StoryCanvas {
             .track_focus(&self.focus)
             .size_full();
         match &self.story {
-            Ok((_, root)) => canvas.child(root.clone()),
+            Ok((_, _, root)) => canvas.child(root.clone()),
             Err(error) => canvas
                 .flex()
                 .items_center()
@@ -196,7 +238,7 @@ impl Item for StoryCanvas {
 
     fn tab_content_text(&self, _: usize, cx: &App) -> SharedString {
         match &self.story {
-            Ok((name, _)) => format!("Story: {name}").into(),
+            Ok((_, name, _)) => format!("Story: {name}").into(),
             Err(_) => self
                 .source
                 .read(cx)

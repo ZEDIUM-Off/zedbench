@@ -19722,9 +19722,12 @@ dependencies = [
  "gpui-component-story",
  "gpui-kit",
  "language",
+ "log",
  "multi_buffer",
  "serde",
  "serde_json",
+ "settings",
+ "theme",
  "workspace",
 ]
 

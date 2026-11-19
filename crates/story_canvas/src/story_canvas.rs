@@ -9,6 +9,8 @@ use serde::Deserialize;
 use std::path::Path;
 use workspace::{Item, Pane, Workspace};
 
+mod zed_theme;
+
 actions!(
     storybook,
     [
@@ -114,6 +116,7 @@ fn init_libraries(cx: &mut App) {
     gpui_component_story::init_embedded(cx);
     // After Kit, which already ran gpui_component::init.
     gpui_ai_gallery::init_embedded(cx);
+    zed_theme::init(cx);
     cx.set_global(LibrariesInitialized);
 }
 

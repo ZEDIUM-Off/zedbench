@@ -275,7 +275,7 @@ members = [
     "tooling/xtask",
 ]
 default-members = ["crates/zed"]
-exclude = ["components/gpui-kit"]
+exclude = ["components/gpui-kit", "components/gpui-ai"]
 
 [workspace.package]
 publish = false
@@ -284,6 +284,8 @@ edition = "2024"
 [workspace.dependencies]
 gpui-component-story = { path = "components/gpui-kit/crates/story", default-features = false }
 gpui-kit = { path = "components/gpui-kit/crates/kit" }
+gpui-ai = { path = "components/gpui-ai/crates/gpui-ai" }
+gpui-ai-gallery = { package = "gallery", path = "components/gpui-ai/crates/gallery", default-features = false }
 
 #
 # Workspace member crates

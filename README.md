@@ -1,4 +1,13 @@
-# Zed
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
+# Zedbench
+
+Zedbench is my private component workbench. I maintain this unofficial fork of [Zed](https://github.com/zed-industries/zed) to explore a personal software factory inside the editor. My goal is to use [GPUI Kit](https://github.com/longbridge/gpui-kit) to shape the interface around how I build software.
+
+## Upstream Zed
+
+The badges and download links below refer to upstream Zed, not builds of this fork.
 
 [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
 [![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)

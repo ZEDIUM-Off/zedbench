@@ -1,3 +1,7 @@
 [submodule "components/gpui-kit"]
 	path = components/gpui-kit
 	url = https://github.com/ZEDIUM-Off/gpui-kit.git
+[submodule "components/gpui-ai"]
+	path = components/gpui-ai
+	url = https://github.com/ZEDIUM-Off/gpui-ai.git
+	branch = zedbench

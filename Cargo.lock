@@ -7627,6 +7627,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gallery"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui-ai",
+ "gpui-base",
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui_platform",
+ "image",
+ "serde_json",
+]
+
+[[package]]
 name = "gaoya"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8447,6 +8462,16 @@ dependencies = [
  "web-time",
  "windows 0.62.2",
  "zed-scap 0.0.8-zed (git+https://github.com/zed-industries/scap?rev=b5c86ec58dd4b6b7732bf6ac8be03d6b1f190a82)",
+]
+
+[[package]]
+name = "gpui-ai"
+version = "0.8.0"
+dependencies = [
+ "gpui",
+ "gpui-base",
+ "gpui-component",
+ "web-time",
 ]
 
 [[package]]
@@ -19692,6 +19717,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "story_canvas"
 version = "0.1.0"
 dependencies = [
+ "gallery",
  "gpui",
  "gpui-component-story",
  "gpui-kit",

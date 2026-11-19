@@ -12,6 +12,45 @@ default-run = "zedbench"
 workspace = true
 
 [features]
+default = []
+# Zedbench leaves these out by default; `full` restores the upstream editor.
+full = ["ai", "collab"]
+ai = [
+    "dep:acp_thread",
+    "dep:acp_tools",
+    "dep:agent",
+    "dep:agent_ui",
+    "dep:codestral",
+    "dep:copilot",
+    "dep:copilot_chat",
+    "dep:copilot_ui",
+    "dep:edit_prediction",
+    "dep:edit_prediction_ui",
+    "dep:language_models",
+    "dep:prompt_store",
+    "dep:sidebar",
+    "dep:web_search",
+    "dep:web_search_providers",
+    "client/accounts",
+    "language_tools/edit_prediction",
+    "onboarding/ai",
+    "settings_ui/ai",
+    "title_bar/accounts",
+]
+collab = [
+    "dep:call",
+    "dep:channel",
+    "dep:collab_ui",
+    "dep:notifications",
+    "dep:audio",
+    "file_finder/channel",
+    "git_ui/call",
+    "onboarding/accounts",
+    "settings_ui/collab",
+    "title_bar/call",
+    "client/accounts",
+    "title_bar/accounts",
+]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
@@ -29,6 +68,7 @@ test-support = [
     "title_bar/test-support",
 ]
 visual-tests = [
+    "full",
     "gpui/test-support",
     "gpui_platform/screen-capture",
     "gpui_platform/test-support",
@@ -64,39 +104,39 @@ path = "src/visual_test_runner.rs"
 required-features = ["visual-tests"]
 
 [dependencies]
-acp_thread.workspace = true
-acp_tools.workspace = true
+acp_thread = { workspace = true, optional = true }
+acp_tools = { workspace = true, optional = true }
 action_log = { workspace = true, optional = true }
 activity_indicator.workspace = true
 agent-client-protocol.workspace = true
-agent.workspace = true
+agent = { workspace = true, optional = true }
 agent_servers = { workspace = true, optional = true }
 agent_settings.workspace = true
 agent_skills.workspace = true
-agent_ui = { workspace = true, features = ["audio"] }
+agent_ui = { workspace = true, features = ["audio"], optional = true }
 anyhow.workspace = true
 askpass.workspace = true
 assets.workspace = true
-audio.workspace = true
+audio = { workspace = true, optional = true }
 auto_update.workspace = true
 auto_update_ui.workspace = true
 breadcrumbs.workspace = true
-call.workspace = true
+call = { workspace = true, optional = true }
 call_hierarchy.workspace = true
-channel.workspace = true
+channel = { workspace = true, optional = true }
 chrono.workspace = true
 clap.workspace = true
 cli.workspace = true
 client.workspace = true
 clock = { workspace = true, optional = true }
-codestral.workspace = true
-collab_ui.workspace = true
+codestral = { workspace = true, optional = true }
+collab_ui = { workspace = true, optional = true }
 collections.workspace = true
 command_palette.workspace = true
 component_preview.workspace = true
-copilot.workspace = true
-copilot_chat.workspace = true
-copilot_ui.workspace = true
+copilot = { workspace = true, optional = true }
+copilot_chat = { workspace = true, optional = true }
+copilot_ui = { workspace = true, optional = true }
 crashes.workspace = true
 dap_adapters.workspace = true
 db.workspace = true
@@ -118,7 +158,7 @@ fs.workspace = true
 futures.workspace = true
 git.workspace = true
 git_hosting_providers.workspace = true
-git_ui = { workspace = true, features = ["call"] }
+git_ui.workspace = true
 git_ui_core.workspace = true
 go_to_line.workspace = true
 gpui = { workspace = true, features = ["profiler", "stacker"] }
@@ -138,8 +178,8 @@ system_specs.workspace = true
 tabular_data_preview.workspace = true
 tempfile = { workspace = true, optional = true }
 
-edit_prediction.workspace = true
-edit_prediction_ui.workspace = true
+edit_prediction = { workspace = true, optional = true }
+edit_prediction_ui = { workspace = true, optional = true }
 http_client.workspace = true
 image_viewer.workspace = true
 input_latency_ui.workspace = true
@@ -151,7 +191,7 @@ keymap_editor.workspace = true
 language.workspace = true
 language_extension.workspace = true
 language_model.workspace = true
-language_models.workspace = true
+language_models = { workspace = true, optional = true }
 language_onboarding.workspace = true
 language_selector.workspace = true
 language_tools.workspace = true
@@ -167,7 +207,7 @@ migrator.workspace = true
 mimalloc = { version = "0.1", optional = true }
 miniprofiler_ui.workspace = true
 node_runtime.workspace = true
-notifications.workspace = true
+notifications = { workspace = true, optional = true }
 onboarding.workspace = true
 outline.workspace = true
 outline_panel.workspace = true
@@ -179,7 +219,7 @@ project.workspace = true
 project_panel.workspace = true
 project_symbols.workspace = true
 project_bookmarks.workspace = true
-prompt_store.workspace = true
+prompt_store = { workspace = true, optional = true }
 proto.workspace = true
 recent_projects.workspace = true
 release_channel.workspace = true
@@ -197,7 +237,7 @@ settings.workspace = true
 settings_profile_selector.workspace = true
 settings_ui.workspace = true
 shellexpand.workspace = true
-sidebar.workspace = true
+sidebar = { workspace = true, optional = true }
 smol.workspace = true
 snippet_provider.workspace = true
 snippets_ui.workspace = true
@@ -227,8 +267,8 @@ uuid.workspace = true
 vim.workspace = true
 vim_mode_setting.workspace = true
 watch.workspace = true
-web_search.workspace = true
-web_search_providers.workspace = true
+web_search = { workspace = true, optional = true }
+web_search_providers = { workspace = true, optional = true }
 which_key.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true

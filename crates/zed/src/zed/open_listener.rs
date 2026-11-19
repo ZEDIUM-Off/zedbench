@@ -1,5 +1,6 @@
 use crate::handle_open_request;
 use crate::restore_or_create_workspace;
+#[cfg(feature = "ai")]
 use agent_ui::ExternalSourcePrompt;
 use anyhow::{Context as _, Result, anyhow};
 use cli::{CliRequest, CliResponse, CliResponseSink};
@@ -59,6 +60,7 @@ pub enum OpenRequestKind {
     Extension {
         extension_id: String,
     },
+    #[cfg(feature = "ai")]
     AgentPanel {
         external_source_prompt: Option<ExternalSourcePrompt>,
     },
@@ -93,6 +95,7 @@ impl std::fmt::Debug for OpenRequestKind {
                 .debug_struct("Extension")
                 .field("extension_id", extension_id)
                 .finish(),
+            #[cfg(feature = "ai")]
             Self::AgentPanel {
                 external_source_prompt,
             } => f
@@ -177,7 +180,10 @@ impl OpenRequest {
             } else if url.starts_with(agent_skills::SKILL_SHARE_LINK_PREFIX) {
                 this.parse_skill_install_url(&url)?
             } else if let Some(agent_path) = url.strip_prefix("zed://agent") {
-                this.parse_agent_url(agent_path)
+                #[cfg(feature = "ai")]
+                this.parse_agent_url(agent_path);
+                #[cfg(not(feature = "ai"))]
+                log::warn!("Ignoring agent link {agent_path:?}: this build has no AI features");
             } else if url == "zed://" || url == "zed://open" || url == "zed://open/" {
                 this.kind = Some(OpenRequestKind::FocusApp);
             } else if let Some(schema_path) = url.strip_prefix("zed://schemas/") {
@@ -239,6 +245,7 @@ impl OpenRequest {
         }
     }
 
+    #[cfg(feature = "ai")]
     fn parse_agent_url(&mut self, agent_path: &str) {
         // Format: "" or "?prompt=<text>".
         let agent_path = agent_path.strip_prefix('/').unwrap_or(agent_path);

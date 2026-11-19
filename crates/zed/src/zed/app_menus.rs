@@ -1,3 +1,4 @@
+#[cfg(feature = "collab")]
 use collab_ui::collab_panel;
 use gpui::{App, Menu, MenuItem, OsAction};
 use project::DisableAiSettings;
@@ -42,10 +43,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action("Project Panel", project_panel::ToggleFocus),
         MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
-        MenuItem::action("Collab Panel", collab_panel::ToggleFocus),
+    ];
+    #[cfg(feature = "collab")]
+    view_items.push(MenuItem::action("Collab Panel", collab_panel::ToggleFocus));
+    view_items.extend([
         MenuItem::action("Terminal Panel", terminal_panel::Toggle),
         MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
-    ];
+    ]);
 
     if !DisableAiSettings::get_global(cx).disable_ai {
         view_items.push(MenuItem::action("Agent Panel", assistant::ToggleFocus));

@@ -7,12 +7,15 @@ use futures::future::join_all;
 pub use open_path_prompt::OpenPathDelegate;
 
 use anyhow::Context as _;
+#[cfg(feature = "channel")]
 use channel::ChannelStore;
 use client::ChannelId;
 use collections::{HashMap, HashSet};
 use editor::Editor;
 use file_icons::FileIcons;
-use fuzzy::{StringMatch, StringMatchCandidate};
+use fuzzy::StringMatch;
+#[cfg(feature = "channel")]
+use fuzzy::StringMatchCandidate;
 use fuzzy_nucleo::{PathMatch, PathMatchCandidate};
 use gpui::{
     Action, AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
@@ -402,6 +405,7 @@ pub struct FileFinderDelegate {
     file_finder: WeakEntity<FileFinder>,
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
+    #[cfg(feature = "channel")]
     channel_store: Option<Entity<ChannelStore>>,
     search_count: usize,
     latest_search_id: usize,
@@ -471,6 +475,7 @@ enum Match {
     },
     Search(ProjectPanelOrdMatch),
     Absolute(PathBuf),
+    #[cfg_attr(not(feature = "channel"), allow(dead_code))]
     Channel {
         channel_id: ChannelId,
         channel_name: SharedString,
@@ -1072,6 +1077,7 @@ impl FileFinderDelegate {
         cx: &mut Context<FileFinder>,
     ) -> Self {
         Self::subscribe_to_updates(&project, window, cx);
+        #[cfg(feature = "channel")]
         let channel_store = if FileFinderSettings::get_global(cx).include_channels {
             ChannelStore::try_global(cx)
         } else {
@@ -1081,6 +1087,7 @@ impl FileFinderDelegate {
             file_finder,
             workspace,
             project,
+            #[cfg(feature = "channel")]
             channel_store,
             search_count: 0,
             latest_search_id: 0,
@@ -1427,7 +1434,7 @@ impl FileFinderDelegate {
                 path_style,
             );
 
-            // Add channel matches
+            #[cfg(feature = "channel")]
             if let Some(channel_store) = &self.channel_store {
                 let channel_store = channel_store.read(cx);
                 let channels: Vec<_> = channel_store.channels().cloned().collect();

@@ -55,13 +55,9 @@ use zed_actions::{
 
 use crate::components::{
     EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
-    SettingsSectionHeader, font_picker, icon_theme_picker, render_ollama_model_picker,
-    text_field_a11y_state, theme_picker,
+    SettingsSectionHeader, font_picker, icon_theme_picker, text_field_a11y_state, theme_picker,
 };
-use crate::pages::{
-    CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,
-    render_output_audio_device_dropdown,
-};
+use crate::pages::{CustomAgentForm, LlmProviderForm, McpServerForm};
 
 const NAVBAR_CONTAINER_TAB_INDEX: isize = 0;
 const NAVBAR_GROUP_TAB_INDEX: isize = 1;
@@ -673,15 +669,27 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::WindowButtonLayoutContentDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::ScanSymlinksSetting>(render_dropdown)
         .add_basic_renderer::<settings::FontSize>(render_editable_number_field)
-        .add_basic_renderer::<settings::OllamaModelName>(render_ollama_model_picker)
         .add_basic_renderer::<settings::SemanticTokens>(render_dropdown)
         .add_basic_renderer::<settings::DocumentFoldingRanges>(render_dropdown)
         .add_basic_renderer::<settings::DocumentSymbols>(render_dropdown)
-        .add_basic_renderer::<settings::AudioInputDeviceName>(render_input_audio_device_dropdown)
-        .add_basic_renderer::<settings::AudioOutputDeviceName>(render_output_audio_device_dropdown)
         .add_basic_renderer::<settings::TerminalBell>(render_dropdown)
         // please semicolon stay on next line
         ;
+
+    #[cfg(feature = "ai")]
+    cx.default_global::<SettingFieldRenderer>()
+        .add_basic_renderer::<settings::OllamaModelName>(
+            crate::components::render_ollama_model_picker,
+        );
+
+    #[cfg(feature = "collab")]
+    cx.default_global::<SettingFieldRenderer>()
+        .add_basic_renderer::<settings::AudioInputDeviceName>(
+            crate::pages::render_input_audio_device_dropdown,
+        )
+        .add_basic_renderer::<settings::AudioOutputDeviceName>(
+            crate::pages::render_output_audio_device_dropdown,
+        );
 }
 
 #[derive(Clone, Copy)]
@@ -3730,6 +3738,7 @@ impl SettingsWindow {
         self.render_sub_page_items_in(page_content, items, false, window, cx)
     }
 
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
     fn render_sub_page_items_section<'a, Items>(
         &self,
         items: Items,

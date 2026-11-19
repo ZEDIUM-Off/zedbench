@@ -1,4 +1,5 @@
 mod app_menus;
+#[cfg(feature = "ai")]
 pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
@@ -15,7 +16,9 @@ pub mod visual_tests;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_only_instance;
 
+#[cfg(feature = "ai")]
 use agent_settings::{UserAgentsMdState, init_user_agents_md};
+#[cfg(feature = "ai")]
 use agent_ui::AgentDiffToolbar;
 use anyhow::Context as _;
 pub use app_menus::*;
@@ -40,7 +43,7 @@ use git_ui::staged_diff::StagedDiffToolbar;
 use git_ui::unstaged_diff::UnstagedDiffToolbar;
 use git_ui_core::file_diff_view::FileDiffStyleToolbar;
 use gpui::{
-    Action, App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, DismissEvent,
+    Action, App, AppContext as _, ClipboardItem, Context, DismissEvent,
     Element, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding, ParentElement,
     PathPromptOptions, PromptLevel, ReadGlobal, SharedString, Size, Task, TaskExt, TitlebarOptions,
     UpdateGlobal, WeakEntity, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
@@ -77,6 +80,7 @@ use settings::{
     SettingsFile, SettingsStore, VIM_KEYMAP_PATH, initial_local_debug_tasks_content,
     initial_project_settings_content, initial_tasks_content, update_settings_file,
 };
+#[cfg(feature = "ai")]
 use sidebar::Sidebar;
 #[cfg(debug_assertions)]
 use workspace::workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError};
@@ -501,8 +505,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 .unwrap_or(true)
         });
 
+        #[cfg(feature = "ai")]
         let window_handle = window.window_handle();
+        #[cfg(feature = "ai")]
         let multi_workspace_handle = cx.entity();
+        #[cfg(feature = "ai")]
         cx.subscribe_in(
             &multi_workspace_handle,
             window,
@@ -535,6 +542,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         )
         .detach();
 
+        #[cfg(feature = "ai")]
         cx.defer(move |cx| {
             window_handle
                 .update(cx, |_, window, cx| {
@@ -584,7 +592,9 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             }
         }
 
+        #[cfg(feature = "ai")]
         let edit_prediction_menu_handle = PopoverMenuHandle::default();
+        #[cfg(feature = "ai")]
         let edit_prediction_ui = cx.new(|cx| {
             edit_prediction_ui::EditPredictionButton::new(
                 app_state.fs.clone(),
@@ -594,6 +604,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 cx,
             )
         });
+        #[cfg(feature = "ai")]
         workspace.register_action({
             move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
                 edit_prediction_menu_handle.toggle(window, cx);
@@ -640,6 +651,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(git_blame_status, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            #[cfg(feature = "ai")]
             status_bar.add_right_item(edit_prediction_ui, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
@@ -781,6 +793,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
+        #[cfg(feature = "collab")]
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
@@ -800,14 +813,28 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             }
         }
 
+        #[cfg(feature = "collab")]
+        let collab_panel =
+            add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()).boxed_local();
+        #[cfg(not(feature = "collab"))]
+        let collab_panel = futures::future::ready(()).boxed_local();
+        #[cfg(feature = "ai")]
+        let agent_panel = initialize_agent_panel(workspace_handle.clone(), cx.clone())
+            .map(|result| {
+                result.log_err();
+            })
+            .boxed_local();
+        #[cfg(not(feature = "ai"))]
+        let agent_panel = futures::future::ready(()).boxed_local();
+
         futures::join!(
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
+            collab_panel,
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
+            agent_panel,
         );
 
         workspace_handle.update(cx, |workspace, cx| {
@@ -818,13 +845,14 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
     })
 }
 
-fn setup_or_teardown_ai_panel<P: Panel>(
+#[cfg(feature = "ai")]
+fn setup_or_teardown_ai_panel<P: workspace::Panel>(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
     load_panel: impl FnOnce(
         WeakEntity<Workspace>,
-        AsyncWindowContext,
+        gpui::AsyncWindowContext,
     ) -> Task<anyhow::Result<Entity<P>>>
     + 'static,
 ) -> Task<anyhow::Result<()>> {
@@ -854,6 +882,7 @@ fn setup_or_teardown_ai_panel<P: Panel>(
     }
 }
 
+#[cfg(feature = "ai")]
 fn ensure_agent_panel_for_workspace(
     workspace: &mut Workspace,
     source_workspace: Option<WeakEntity<Workspace>>,
@@ -878,9 +907,10 @@ fn ensure_agent_panel_for_workspace(
     })
 }
 
+#[cfg(feature = "ai")]
 async fn initialize_agent_panel(
     workspace_handle: WeakEntity<Workspace>,
-    mut cx: AsyncWindowContext,
+    mut cx: gpui::AsyncWindowContext,
 ) -> anyhow::Result<()> {
     workspace_handle
         .update_in(&mut cx, |workspace, window, cx| {
@@ -1331,14 +1361,6 @@ fn register_actions(
         )
         .register_action(
             |workspace: &mut Workspace,
-             _: &collab_ui::collab_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
-            },
-        )
-        .register_action(
-            |workspace: &mut Workspace,
              _: &terminal_panel::ToggleFocus,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
@@ -1426,7 +1448,17 @@ fn register_actions(
         });
     }
 
+    #[cfg(feature = "ai")]
     workspace.register_action(sidebar::dump_workspace_info);
+    #[cfg(feature = "collab")]
+    workspace.register_action(
+        |workspace: &mut Workspace,
+         _: &collab_ui::collab_panel::ToggleFocus,
+         window: &mut Window,
+         cx: &mut Context<Workspace>| {
+            workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
+        },
+    );
 
     #[cfg(debug_assertions)]
     workspace.register_action(|workspace, _: &ShowWorkspaceError, _, cx| {
@@ -1504,8 +1536,11 @@ fn initialize_pane(
             toolbar.add_item(lsp_log_item, window, cx);
             let dap_log_item = cx.new(|_| debugger_tools::DapLogToolbarItemView::new());
             toolbar.add_item(dap_log_item, window, cx);
-            let acp_tools_item = cx.new(|_| acp_tools::AcpToolsToolbarItemView::new());
-            toolbar.add_item(acp_tools_item, window, cx);
+            #[cfg(feature = "ai")]
+            {
+                let acp_tools_item = cx.new(|_| acp_tools::AcpToolsToolbarItemView::new());
+                toolbar.add_item(acp_tools_item, window, cx);
+            }
             let telemetry_log_item =
                 cx.new(|cx| telemetry_log::TelemetryLogToolbarItemView::new(window, cx));
             toolbar.add_item(telemetry_log_item, window, cx);
@@ -1529,8 +1564,11 @@ fn initialize_pane(
             toolbar.add_item(solo_diff_git_toolbar, window, cx);
             let commit_view_toolbar = cx.new(|_| CommitViewToolbar::new());
             toolbar.add_item(commit_view_toolbar, window, cx);
-            let agent_diff_toolbar = cx.new(AgentDiffToolbar::new);
-            toolbar.add_item(agent_diff_toolbar, window, cx);
+            #[cfg(feature = "ai")]
+            {
+                let agent_diff_toolbar = cx.new(AgentDiffToolbar::new);
+                toolbar.add_item(agent_diff_toolbar, window, cx);
+            }
             let basedpyright_banner = cx.new(|cx| BasedPyrightBanner::new(workspace, cx));
             toolbar.add_item(basedpyright_banner, window, cx);
             let image_view_toolbar = cx.new(|_| image_viewer::ImageViewToolbarControls::new());
@@ -2100,6 +2138,7 @@ fn init_reduce_motion(cx: &mut App) {
 ///
 /// The file itself is loaded into [`agent_settings::UserAgentsMd`] for inclusion
 /// in prompts.
+#[cfg(feature = "ai")]
 pub fn watch_user_agents_md(fs: Arc<dyn fs::Fs>, cx: &mut App) {
     struct UserAgentsMdParseError;
     let notification_id = NotificationId::unique::<UserAgentsMdParseError>();
@@ -2365,32 +2404,52 @@ pub fn load_default_keymap(cx: &mut App) {
     }
 
     cx.bind_keys(filter_disabled_ai_bindings(
-        KeymapFile::load_asset(DEFAULT_KEYMAP_PATH, Some(KeybindSource::Default), cx).unwrap(),
+        load_bundled_keymap(DEFAULT_KEYMAP_PATH, KeybindSource::Default, cx),
         cx,
     ));
 
     if let Some(asset_path) = base_keymap.asset_path() {
         cx.bind_keys(filter_disabled_ai_bindings(
-            KeymapFile::load_asset(asset_path, Some(KeybindSource::Base), cx).unwrap(),
+            load_bundled_keymap(asset_path, KeybindSource::Base, cx),
             cx,
         ));
     }
 
     if VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0 {
         cx.bind_keys(filter_disabled_ai_bindings(
-            KeymapFile::load_asset(VIM_KEYMAP_PATH, Some(KeybindSource::Vim), cx).unwrap(),
+            load_bundled_keymap(VIM_KEYMAP_PATH, KeybindSource::Vim, cx),
             cx,
         ));
     }
 
-    cx.bind_keys(
-        KeymapFile::load_asset(
-            SPECIFIC_OVERRIDES_KEYMAP_PATH,
-            Some(KeybindSource::Default),
-            cx,
-        )
-        .unwrap(),
-    );
+    cx.bind_keys(load_bundled_keymap(
+        SPECIFIC_OVERRIDES_KEYMAP_PATH,
+        KeybindSource::Default,
+        cx,
+    ));
+}
+
+#[cfg(all(feature = "ai", feature = "collab"))]
+fn load_bundled_keymap(asset_path: &str, source: KeybindSource, cx: &App) -> Vec<KeyBinding> {
+    KeymapFile::load_asset(asset_path, Some(source), cx).unwrap()
+}
+
+/// The bundled keymaps bind actions of crates that this build leaves out, so
+/// those bindings fail to load and are skipped.
+#[cfg(not(all(feature = "ai", feature = "collab")))]
+fn load_bundled_keymap(asset_path: &str, source: KeybindSource, cx: &App) -> Vec<KeyBinding> {
+    match KeymapFile::load_asset_allow_partial_failure(asset_path, cx) {
+        Ok(mut key_bindings) => {
+            for key_binding in &mut key_bindings {
+                key_binding.set_meta(source.meta());
+            }
+            key_bindings
+        }
+        Err(error) => {
+            log::error!("{error:#}");
+            Vec::new()
+        }
+    }
 }
 
 /// Namespaces of actions that are part of an AI feature. When the user opts out

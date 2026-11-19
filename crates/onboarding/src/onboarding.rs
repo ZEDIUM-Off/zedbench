@@ -25,10 +25,11 @@ use workspace::{
     AppState, Workspace, WorkspaceId,
     dock::DockPosition,
     item::{Item, ItemEvent},
-    notifications::NotifyResultExt as _,
     open_new, register_serializable_item, with_active_or_new_workspace,
 };
 use zed_actions::OpenOnboarding;
+#[cfg(feature = "accounts")]
+use workspace::notifications::NotifyResultExt as _;
 
 mod base_keymap_picker;
 mod basics_page;
@@ -278,6 +279,7 @@ impl Onboarding {
         go_to_welcome_page(cx);
     }
 
+    #[cfg(feature = "accounts")]
     fn handle_sign_in(&mut self, _: &SignIn, window: &mut Window, cx: &mut Context<Self>) {
         let client = Client::global(cx);
         let workspace = self.workspace.clone();
@@ -315,7 +317,11 @@ impl Render for Onboarding {
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .on_action(Self::on_finish)
-            .on_action(cx.listener(Self::handle_sign_in))
+            .when(cfg!(feature = "accounts"), |this| {
+                #[cfg(feature = "accounts")]
+                let this = this.on_action(cx.listener(Self::handle_sign_in));
+                this
+            })
             .on_action(Self::handle_open_account)
             .on_action(cx.listener(|_, _: &menu::SelectNext, window, cx| {
                 window.focus_next(cx);

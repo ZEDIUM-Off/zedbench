@@ -15,19 +15,23 @@ const _: () = assert!(
      Forks: update APP_NAME in crates/paths/src/paths.rs when renaming the binary.",
 );
 
+#[cfg(feature = "ai")]
 use agent_ui::AgentPanel;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
-use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore, parse_zed_link};
+use client::{Client, ProxySettings, UserStore, parse_zed_link};
+#[cfg(feature = "collab")]
 use collab_ui::channel_view::ChannelView;
+#[cfg(feature = "collab")]
+use workspace::notifications::NotifyResultExt as _;
 use collections::HashMap;
 use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use editor::Editor;
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
-use futures::{FutureExt, StreamExt, channel::oneshot, future};
+use futures::{FutureExt, StreamExt, channel::oneshot};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
 use gpui::{
@@ -39,6 +43,7 @@ use gpui_tokio::Tokio;
 use language::LanguageRegistry;
 use onboarding::{FIRST_OPEN, show_onboarding_view};
 use project_panel::ProjectPanel;
+#[cfg(feature = "ai")]
 use prompt_store::PromptBuilder;
 use remote::RemoteConnectionOptions;
 use reqwest_client::ReqwestClient;
@@ -64,17 +69,17 @@ use std::{
 };
 use theme::{ActiveTheme, GlobalTheme, ThemeRegistry};
 use theme_settings::load_user_theme;
-use util::{ResultExt, maybe};
+use util::ResultExt;
 use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
     WorkspaceSettings, WorkspaceStore,
-    notifications::{NotificationId, NotifyResultExt},
+    notifications::NotificationId,
     restore_multiworkspace,
 };
 use zed::{
     OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
-    derive_paths_with_position, edit_prediction_registry, handle_cli_connection,
+    derive_paths_with_position, handle_cli_connection,
     handle_keymap_file_changes, initialize_workspace, open_paths_with_positions,
 };
 
@@ -504,6 +509,7 @@ fn main() {
             AppCommitSha::set_global(app_commit_sha, cx);
         }
         settings::init(cx);
+        disable_ai_when_omitted(cx);
         zlog_settings::init(cx);
         zed::watch_settings_files(fs.clone(), cx);
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
@@ -632,6 +638,7 @@ fn main() {
         })
         .detach();
 
+        #[cfg(feature = "ai")]
         let is_new_install = matches!(&installation_id, Some(IdType::New(_)));
 
         // We should rename these in the future to `first app open`, `first app open for release channel`, and `app open`
@@ -684,50 +691,12 @@ fn main() {
             cx.background_executor().clone(),
         );
         command_palette::init(cx);
-        let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
-            enterprise_uri: settings::CopilotSettings::get_global(cx)
-                .enterprise_uri
-                .clone(),
-        };
-        let credentials_provider = zed_credentials_provider::global(cx);
-        copilot_chat::init(
-            app_state.client.http_client(),
-            credentials_provider,
-            copilot_chat_configuration,
-            cx,
-        );
-
-        copilot_ui::init(&app_state, cx);
         language_model::init(cx);
-        RefreshLlmTokenListener::register(
-            app_state.client.clone(),
-            app_state.user_store.clone(),
-            cx,
-        );
-        language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
-        acp_tools::init(cx);
         zed::telemetry_log::init(cx);
         zed::remote_debug::init(cx);
-        edit_prediction_ui::init(cx);
-        web_search::init(cx);
-        web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         snippet_provider::init(cx);
-        edit_prediction_registry::init(app_state.client.clone(), app_state.user_store.clone(), cx);
-        let prompt_builder = PromptBuilder::load(app_state.fs.clone(), stdout_is_a_pty(), cx);
-        project::AgentRegistryStore::init_global(
-            cx,
-            app_state.fs.clone(),
-            app_state.client.http_client(),
-        );
-        agent_ui::init(
-            app_state.fs.clone(),
-            prompt_builder,
-            app_state.languages.clone(),
-            is_new_install,
-            false,
-            cx,
-        );
-        zed::watch_user_agents_md(app_state.fs.clone(), cx);
+        #[cfg(feature = "ai")]
+        init_ai(&app_state, is_new_install, cx);
 
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);
@@ -742,6 +711,7 @@ fn main() {
         repl::notebook::init(cx);
         diagnostics::init(cx);
 
+        #[cfg(feature = "collab")]
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
         ui_prompt::init(cx);
@@ -757,6 +727,7 @@ fn main() {
         outline_panel::init(cx);
         tasks_ui::init(cx);
         snippets_ui::init(cx);
+        #[cfg(feature = "collab")]
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
         lsp_locations::init(cx);
@@ -780,9 +751,12 @@ fn main() {
         theme_selector::init(cx);
         settings_profile_selector::init(cx);
         language_tools::init(cx);
-        call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
-        notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
-        collab_ui::init(&app_state, cx);
+        #[cfg(feature = "collab")]
+        {
+            call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+            notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+            collab_ui::init(&app_state, cx);
+        }
         git_ui::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
@@ -793,6 +767,7 @@ fn main() {
         settings_ui::init(cx);
         keymap_editor::init(cx);
         extensions_ui::init(cx);
+        #[cfg(feature = "ai")]
         edit_prediction::init(cx);
         inspector_ui::init(app_state.clone(), cx);
         json_schema_store::init(cx);
@@ -887,6 +862,7 @@ fn main() {
 
         cx.activate(true);
 
+        #[cfg(any(feature = "ai", feature = "collab"))]
         cx.spawn({
             let client = app_state.client.clone();
             async move |cx| authenticate(client, cx).await
@@ -1046,6 +1022,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                 })
                 .detach_and_log_err(cx);
             }
+            #[cfg(feature = "ai")]
             OpenRequestKind::AgentPanel {
                 external_source_prompt,
             } => {
@@ -1315,9 +1292,10 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
         }));
     }
 
-    if !request.open_channel_notes.is_empty() || request.join_channel.is_some() {
+    #[cfg(feature = "collab")]
+    let task = if !request.open_channel_notes.is_empty() || request.join_channel.is_some() {
         cx.spawn(async move |cx| {
-            let result = maybe!(async {
+            let result = util::maybe!(async {
                 if let Some(task) = task {
                     task.await?;
                 }
@@ -1357,7 +1335,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                         )
                     })?)
                 }
-                for result in future::join_all(promises).await {
+                for result in futures::future::join_all(promises).await {
                     result.notify_workspace_async_err(weak_workspace.clone(), cx);
                 }
                 anyhow::Ok(())
@@ -1367,8 +1345,17 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                 fail_to_open_window_async(err, cx);
             }
         })
-        .detach()
-    } else if let Some(task) = task {
+        .detach();
+        None
+    } else {
+        task
+    };
+    #[cfg(not(feature = "collab"))]
+    if !request.open_channel_notes.is_empty() || request.join_channel.is_some() {
+        log::warn!("Ignoring a channel link: this build has no collaboration features");
+    }
+
+    if let Some(task) = task {
         cx.spawn(async move |cx| {
             if let Err(err) = task.await {
                 fail_to_open_window_async(err, cx);
@@ -1378,6 +1365,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
     }
 }
 
+#[cfg(any(feature = "ai", feature = "collab"))]
 async fn authenticate(client: Arc<Client>, cx: &AsyncApp) -> Result<()> {
     if stdout_is_a_pty() {
         if client::IMPERSONATE_LOGIN.is_some() {
@@ -1390,6 +1378,62 @@ async fn authenticate(client: Arc<Client>, cx: &AsyncApp) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Hides the AI surfaces of crates that this build still links, such as the
+/// settings pages, when the AI crates themselves are left out.
+fn disable_ai_when_omitted(cx: &mut App) {
+    if cfg!(feature = "ai") {
+        return;
+    }
+    SettingsStore::update_global(cx, |store, cx| {
+        store.update_default_settings(cx, |settings| {
+            settings.project.disable_ai = Some(true.into());
+        });
+    });
+}
+
+#[cfg(feature = "ai")]
+fn init_ai(app_state: &Arc<AppState>, is_new_install: bool, cx: &mut App) {
+    let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
+        enterprise_uri: settings::CopilotSettings::get_global(cx)
+            .enterprise_uri
+            .clone(),
+    };
+    let credentials_provider = zed_credentials_provider::global(cx);
+    copilot_chat::init(
+        app_state.client.http_client(),
+        credentials_provider,
+        copilot_chat_configuration,
+        cx,
+    );
+    copilot_ui::init(app_state, cx);
+    client::RefreshLlmTokenListener::register(
+        app_state.client.clone(),
+        app_state.user_store.clone(),
+        cx,
+    );
+    language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
+    acp_tools::init(cx);
+    edit_prediction_ui::init(cx);
+    web_search::init(cx);
+    web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+    zed::edit_prediction_registry::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+    let prompt_builder = PromptBuilder::load(app_state.fs.clone(), stdout_is_a_pty(), cx);
+    project::AgentRegistryStore::init_global(
+        cx,
+        app_state.fs.clone(),
+        app_state.client.http_client(),
+    );
+    agent_ui::init(
+        app_state.fs.clone(),
+        prompt_builder,
+        app_state.languages.clone(),
+        is_new_install,
+        false,
+        cx,
+    );
+    zed::watch_user_agents_md(app_state.fs.clone(), cx);
 }
 
 async fn system_id() -> Result<IdType> {

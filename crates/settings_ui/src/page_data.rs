@@ -63,7 +63,7 @@ macro_rules! concat_sections {
 }
 
 pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
-    vec![
+    let mut pages = vec![
         general_page(cx),
         appearance_page(),
         keymap_page(),
@@ -79,7 +79,14 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         ai_page(cx),
         network_page(),
         developer_page(cx),
-    ]
+    ];
+    // These pages configure crates that this build may leave out.
+    pages.retain(|page| match page.title {
+        "AI" => cfg!(feature = "ai"),
+        "Collaboration" => cfg!(feature = "collab"),
+        _ => true,
+    });
+    pages
 }
 
 fn developer_page(cx: &App) -> SettingsPage {
@@ -3697,10 +3704,16 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                     in_json: true,
                     files: USER | PROJECT,
                     render: |this, scroll_handle, window, cx| {
+                        #[cfg(feature = "ai")]
                         let items: Box<[SettingsPageItem]> = concat_sections!(
                             language_settings_data(),
                             non_editor_language_settings_data(),
                             edit_prediction_language_settings_section()
+                        );
+                        #[cfg(not(feature = "ai"))]
+                        let items: Box<[SettingsPageItem]> = concat_sections!(
+                            language_settings_data(),
+                            non_editor_language_settings_data()
                         );
                         this.render_sub_page_items(
                             items.iter().enumerate(),

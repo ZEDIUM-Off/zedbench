@@ -1,21 +1,32 @@
 use std::sync::Arc;
+#[cfg(feature = "ai")]
 use std::time::Duration;
 
-use client::{Client, TelemetrySettings, UserStore, zed_urls};
+use client::{TelemetrySettings, UserStore};
+#[cfg(feature = "ai")]
+use client::{Client, zed_urls};
+#[cfg(feature = "ai")]
 use cloud_api_types::Plan;
+#[cfg(feature = "ai")]
 use collections::HashMap;
 use fs::Fs;
-use gpui::{Action, Animation, AnimationExt, App, Entity, IntoElement, TaskExt, pulsating_between};
+use gpui::{Action, App, Entity, IntoElement};
+#[cfg(feature = "ai")]
+use gpui::{Animation, AnimationExt, TaskExt, pulsating_between};
+#[cfg(feature = "ai")]
 use project::agent_server_store::AllAgentServersSettings;
 use project::project_settings::ProjectSettings;
+#[cfg(feature = "ai")]
 use project::{AgentRegistryStore, RegistryAgent};
-use settings::{
-    BaseKeymap, CustomAgentServerSettings, Settings, SettingsStore, update_settings_file,
-};
+use settings::{BaseKeymap, Settings, update_settings_file};
+#[cfg(feature = "ai")]
+use settings::{CustomAgentServerSettings, SettingsStore};
 use theme::{Appearance, SystemAppearance, ThemeRegistry};
 use theme_settings::{ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings};
+#[cfg(feature = "ai")]
+use ui::AgentSetupButton;
 use ui::{
-    AgentSetupButton, Divider, StatefulInteractiveElement, SwitchField, TintColor,
+    Divider, StatefulInteractiveElement, SwitchField, TintColor,
     ToggleButtonGroup, ToggleButtonGroupSize, ToggleButtonSimple, ToggleButtonWithIcon, Tooltip,
     prelude::*,
 };
@@ -539,6 +550,7 @@ fn render_import_settings_section(tab_index: &mut isize, cx: &mut App) -> impl I
 pub(crate) const FEATURED_AGENT_IDS: &[&str] =
     &["claude-acp", "codex-acp", "github-copilot-cli", "cursor"];
 
+#[cfg(feature = "ai")]
 fn render_registry_agent_button(
     agent: &RegistryAgent,
     installed: bool,
@@ -598,6 +610,7 @@ fn render_registry_agent_button(
         })
 }
 
+#[cfg(feature = "ai")]
 fn render_zed_agent_button(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
     let client = Client::global(cx);
     let status = *client.status().borrow();
@@ -670,6 +683,7 @@ fn render_zed_agent_button(user_store: &Entity<UserStore>, cx: &mut App) -> impl
         })
 }
 
+#[cfg(feature = "ai")]
 fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
     let registry_agents = AgentRegistryStore::try_global(cx)
         .map(|store| store.read(cx).agents().to_vec())
@@ -712,6 +726,7 @@ fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoE
         .child(grid)
 }
 
+#[cfg_attr(not(feature = "ai"), allow(unused_variables))]
 pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
     let mut tab_index = 0;
 
@@ -720,7 +735,11 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
         .gap_6()
         .child(render_theme_section(&mut tab_index, cx))
         .child(render_base_keymap_section(&mut tab_index, cx))
-        .child(render_ai_section(user_store, cx))
+        .when(cfg!(feature = "ai"), |this| {
+            #[cfg(feature = "ai")]
+            let this = this.child(render_ai_section(user_store, cx));
+            this
+        })
         .child(render_import_settings_section(&mut tab_index, cx))
         .child(render_vim_mode_switch(&mut tab_index, cx))
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))

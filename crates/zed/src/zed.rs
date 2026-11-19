@@ -103,7 +103,7 @@ use vim_mode_setting::VimModeSetting;
 use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
 
 use workspace::{
-    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, OpenPathPromptMode, Panel, Toast,
+    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, OpenPathPromptMode, Toast,
     Workspace, WorkspaceSettings, create_and_open_local_file,
     notifications::simple_message_notification::MessageNotification, open_new,
 };

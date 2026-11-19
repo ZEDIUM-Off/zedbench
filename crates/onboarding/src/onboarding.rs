@@ -1,5 +1,7 @@
 use crate::multibuffer_hint::MultibufferHint;
-use client::{Client, UserStore, zed_urls};
+use client::{Client, UserStore};
+#[cfg(feature = "accounts")]
+use client::zed_urls;
 use cloud_api_types::Plan;
 use db::kvp::KeyValueStore;
 use fs::Fs;
@@ -294,6 +296,7 @@ impl Onboarding {
             .detach();
     }
 
+    #[cfg(feature = "accounts")]
     fn handle_open_account(_: &OpenAccount, _: &mut Window, cx: &mut App) {
         cx.open_url(&zed_urls::account_url(cx))
     }
@@ -319,10 +322,11 @@ impl Render for Onboarding {
             .on_action(Self::on_finish)
             .when(cfg!(feature = "accounts"), |this| {
                 #[cfg(feature = "accounts")]
-                let this = this.on_action(cx.listener(Self::handle_sign_in));
+                let this = this
+                    .on_action(cx.listener(Self::handle_sign_in))
+                    .on_action(Self::handle_open_account);
                 this
             })
-            .on_action(Self::handle_open_account)
             .on_action(cx.listener(|_, _: &menu::SelectNext, window, cx| {
                 window.focus_next(cx);
                 cx.notify();

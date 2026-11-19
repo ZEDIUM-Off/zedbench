@@ -751,6 +751,8 @@ fn main() {
         theme_selector::init(cx);
         settings_profile_selector::init(cx);
         language_tools::init(cx);
+        #[cfg(not(feature = "collab"))]
+        title_bar::init(cx);
         #[cfg(feature = "collab")]
         {
             call::init(app_state.client.clone(), app_state.user_store.clone(), cx);

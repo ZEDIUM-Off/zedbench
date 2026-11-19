@@ -1240,7 +1240,7 @@ pub struct DisableAiSettings {
 impl settings::Settings for DisableAiSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         Self {
-            disable_ai: content.project.disable_ai.unwrap().0,
+            disable_ai: !cfg!(feature = "ai-support") || content.project.disable_ai.unwrap().0,
         }
     }
 }

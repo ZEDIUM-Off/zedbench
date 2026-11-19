@@ -8,6 +8,7 @@ use ui::{Tooltip, prelude::*, text_for_keystroke};
 use super::QuickActionBar;
 
 enum PreviewTarget {
+    Story(Entity<language::Buffer>),
     Markdown(Entity<Editor>),
     Svg(Entity<MultiBuffer>),
     TabularData(Entity<Editor>),
@@ -21,7 +22,11 @@ impl QuickActionBar {
         let active_item = self.active_item.as_ref()?;
         let editor = active_item.act_as::<Editor>(cx);
 
-        let preview_target = if let Some(editor) = &editor
+        let preview_target = if let Some(buffer) = active_item.act_as::<MultiBuffer>(cx)
+            && let Some(source) = story_canvas::story_source(&buffer, cx)
+        {
+            PreviewTarget::Story(source)
+        } else if let Some(editor) = &editor
             && MarkdownPreviewView::is_markdown_file(editor, cx)
         {
             PreviewTarget::Markdown(editor.clone())
@@ -38,6 +43,11 @@ impl QuickActionBar {
         };
 
         let (button_id, tooltip_text, open_action_for_tooltip) = match &preview_target {
+            PreviewTarget::Story(_) => (
+                "preview-gpui-story",
+                "Preview GPUI Story",
+                &story_canvas::OpenCanvas as &dyn gpui::Action,
+            ),
             PreviewTarget::Markdown(_) => (
                 "toggle-markdown-preview",
                 "Preview Markdown",
@@ -88,6 +98,14 @@ impl QuickActionBar {
                         };
                         let open_to_the_side = window.modifiers().alt;
                         match &preview_target {
+                            PreviewTarget::Story(source) => story_canvas::open(
+                                workspace,
+                                source.clone(),
+                                pane,
+                                open_to_the_side,
+                                window,
+                                cx,
+                            ),
                             PreviewTarget::Markdown(editor) => {
                                 let editor = editor.clone();
                                 if open_to_the_side {

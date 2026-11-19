@@ -647,6 +647,14 @@
     },
   },
   {
+    "context": "Editor && extension == gpui-story",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k v": "storybook::OpenCanvasToTheSide",
+      "cmd-shift-v": "storybook::OpenCanvas",
+    },
+  },
+  {
     "context": "Editor && extension == svg",
     "use_key_equivalents": true,
     "bindings": {

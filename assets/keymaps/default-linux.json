@@ -609,6 +609,14 @@
     },
   },
   {
+    "context": "Editor && extension == gpui-story",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k v": "storybook::OpenCanvasToTheSide",
+      "ctrl-shift-v": "storybook::OpenCanvas",
+    },
+  },
+  {
     "context": "Editor && extension == svg",
     "use_key_equivalents": true,
     "bindings": {

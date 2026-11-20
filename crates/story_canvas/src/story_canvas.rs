@@ -6,7 +6,7 @@ use gpui_kit::base::Root;
 use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBuffer;
 use std::path::Path;
-use workspace::{Item, Pane, Workspace};
+use workspace::{Item, OpenInPreview, Pane, Workspace};
 
 mod openui_library;
 mod openui_story;
@@ -29,15 +29,61 @@ pub const STORY_EXTENSION: &str = "gpui-story";
 const MAX_STORY_BYTES: usize = 64 * 1024;
 
 pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _, _| {
+    cx.observe_new(|workspace: &mut Workspace, window, cx| {
         workspace.register_action(|workspace, _: &OpenCanvas, window, cx| {
             open_active(workspace, false, window, cx)
         });
         workspace.register_action(|workspace, _: &OpenCanvasToTheSide, window, cx| {
             open_active(workspace, true, window, cx)
         });
+        let Some(window) = window else {
+            return;
+        };
+        let workspace_entity = cx.entity();
+        cx.subscribe_in(&workspace_entity, window, open_added_story)
+            .detach();
     })
     .detach();
+}
+
+/// Opens the canvas of a story file as the `open_in_preview` setting asks.
+fn open_added_story(
+    workspace: &mut Workspace,
+    _: &Entity<Workspace>,
+    event: &workspace::Event,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let workspace::Event::ItemAdded { item } = event else {
+        return;
+    };
+    if workspace.is_restoring() {
+        return;
+    }
+    let Some(source) = item
+        .act_as::<MultiBuffer>(cx)
+        .and_then(|buffer| story_source(&buffer, cx))
+    else {
+        return;
+    };
+    let Some(mode) = workspace::open_in_preview_mode(item.as_ref(), cx) else {
+        return;
+    };
+    let Some(pane) = workspace.pane_for_item_id(item.item_id()) else {
+        return;
+    };
+    match mode {
+        OpenInPreview::Editor => {}
+        OpenInPreview::Side => open(workspace, source, pane, true, window, cx),
+        OpenInPreview::Replace => {
+            open(workspace, source, pane.clone(), false, window, cx);
+            if !item.is_dirty(cx) {
+                pane.update(cx, |pane, cx| {
+                    pane.remove_item(item.item_id(), false, false, window, cx);
+                });
+            }
+        }
+    }
 }
 
 /// The buffer of `buffer` when it is a single `.gpui-story` file.

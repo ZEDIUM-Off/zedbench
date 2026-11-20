@@ -5,11 +5,15 @@ use collections::HashMap;
 use gpui::{App, Subscription};
 use serde::Deserialize;
 pub use settings::{
-    AutosaveSetting, BottomDockLayout, EncodingDisplayOptions, InactiveOpacity,
+    AutosaveSetting, BottomDockLayout, EncodingDisplayOptions, InactiveOpacity, OpenInPreview,
     PaneSplitDirectionHorizontal, PaneSplitDirectionVertical, RegisterSetting,
     RestoreOnStartupBehavior, Settings,
 };
 use settings::{CommandAliasTarget, SettingsStore};
+use util::{
+    paths::{PathMatcher, PathStyle},
+    rel_path::RelPath,
+};
 
 #[derive(RegisterSetting)]
 pub struct WorkspaceSettings {
@@ -26,6 +30,7 @@ pub struct WorkspaceSettings {
     pub default_open_behavior: settings::DefaultOpenBehavior,
     pub restore_on_file_reopen: bool,
     pub reveal_if_open: bool,
+    pub open_in_preview: OpenInPreviewSettings,
     pub drop_target_size: f32,
     pub use_system_path_prompts: bool,
     pub use_system_prompts: bool,
@@ -47,6 +52,40 @@ pub struct WorkspaceSettings {
     pub zoomed_padding: bool,
     pub window_decorations: settings::WindowDecorations,
     pub focus_follows_mouse: FocusFollowsMouse,
+}
+
+/// The compiled `open_in_preview` patterns, longest first so the most specific
+/// pattern decides.
+#[derive(Clone, Default)]
+pub struct OpenInPreviewSettings {
+    rules: Vec<(PathMatcher, OpenInPreview)>,
+}
+
+impl OpenInPreviewSettings {
+    fn new(patterns: HashMap<String, OpenInPreview>) -> Self {
+        let mut patterns = patterns.into_iter().collect::<Vec<_>>();
+        patterns.sort_by(|(left, _), (right, _)| {
+            right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+        });
+        let rules = patterns
+            .into_iter()
+            .map(|(pattern, mode)| {
+                let matcher = PathMatcher::new_lenient([&pattern], PathStyle::local(), |error| {
+                    log::error!("invalid open_in_preview pattern {pattern:?}: {error}")
+                });
+                (matcher, mode)
+            })
+            .collect();
+        Self { rules }
+    }
+
+    /// How the file at `path`, relative to its worktree, should open.
+    pub fn mode_for(&self, path: &RelPath) -> Option<OpenInPreview> {
+        self.rules
+            .iter()
+            .find(|(matcher, _)| matcher.is_match(path))
+            .map(|(_, mode)| *mode)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -126,6 +165,9 @@ impl Settings for WorkspaceSettings {
             default_open_behavior: workspace.default_open_behavior.unwrap(),
             restore_on_file_reopen: workspace.restore_on_file_reopen.unwrap(),
             reveal_if_open: workspace.reveal_if_open.unwrap(),
+            open_in_preview: OpenInPreviewSettings::new(
+                workspace.open_in_preview.clone().unwrap_or_default(),
+            ),
             drop_target_size: workspace.drop_target_size.unwrap(),
             use_system_path_prompts: workspace.use_system_path_prompts.unwrap(),
             use_system_prompts: workspace.use_system_prompts.unwrap(),
@@ -238,5 +280,27 @@ impl Settings for StatusBarSettings {
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
             pending_keystrokes_indicator: status_bar.pending_keystrokes_indicator.unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod open_in_preview_tests {
+    use super::*;
+
+    #[test]
+    fn longest_matching_pattern_decides() {
+        let settings = OpenInPreviewSettings::new(HashMap::from_iter([
+            ("*.gpui-story".to_owned(), OpenInPreview::Side),
+            ("drafts/**/*.gpui-story".to_owned(), OpenInPreview::Editor),
+            ("*.md".to_owned(), OpenInPreview::Replace),
+        ]));
+        let mode = |path: &str| settings.mode_for(util::rel_path::rel_path(path));
+        assert_eq!(
+            mode("components/stories/a.gpui-story"),
+            Some(OpenInPreview::Side)
+        );
+        assert_eq!(mode("drafts/x/b.gpui-story"), Some(OpenInPreview::Editor));
+        assert_eq!(mode("README.md"), Some(OpenInPreview::Replace));
+        assert_eq!(mode("src/main.rs"), None);
     }
 }

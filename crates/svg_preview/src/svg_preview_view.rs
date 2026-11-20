@@ -13,7 +13,7 @@ use project::ProjectPath;
 use ui::prelude::*;
 use workspace::item::Item;
 use workspace::notifications::NotifyResultExt;
-use workspace::{Pane, Workspace};
+use workspace::{OpenInPreview, Pane, Workspace};
 
 use crate::{OpenFollowingPreview, OpenPreview, OpenPreviewToTheSide};
 
@@ -279,7 +279,48 @@ impl SvgPreviewView {
         cx.notify();
     }
 
-    pub fn register(workspace: &mut Workspace, _window: &mut Window, _cx: &mut Context<Workspace>) {
+    pub fn register(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+        let workspace_entity = cx.entity();
+        cx.subscribe_in(
+            &workspace_entity,
+            window,
+            |workspace, _, event: &workspace::Event, window, cx| {
+                let workspace::Event::ItemAdded { item } = event else {
+                    return;
+                };
+                if workspace.is_restoring() {
+                    return;
+                }
+                let Some(buffer) = item
+                    .act_as::<MultiBuffer>(cx)
+                    .filter(|buffer| Self::is_svg_file(buffer, cx))
+                else {
+                    return;
+                };
+                let Some(mode) = workspace::open_in_preview_mode(item.as_ref(), cx) else {
+                    return;
+                };
+                let Some(pane) = workspace.pane_for_item_id(item.item_id()) else {
+                    return;
+                };
+                match mode {
+                    OpenInPreview::Editor => {}
+                    OpenInPreview::Side => {
+                        Self::open_preview_to_the_side_of_pane(workspace, buffer, pane, window, cx);
+                    }
+                    OpenInPreview::Replace => {
+                        Self::open_preview_in_pane(workspace, buffer, pane.clone(), window, cx);
+                        if !item.is_dirty(cx) {
+                            pane.update(cx, |pane, cx| {
+                                pane.remove_item(item.item_id(), false, false, window, cx);
+                            });
+                        }
+                    }
+                }
+            },
+        )
+        .detach();
+
         workspace.register_action(move |workspace, _: &OpenPreview, window, cx| {
             if let Some(item) = workspace.item_for_action(window, cx)
                 && let Some(buffer) = item.act_as::<MultiBuffer>(cx)

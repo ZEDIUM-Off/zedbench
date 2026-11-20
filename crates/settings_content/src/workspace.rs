@@ -75,6 +75,12 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: false
     pub reveal_if_open: Option<bool>,
+    /// Files to open in their preview, keyed by glob pattern over the path
+    /// in the project. When several patterns match, the longest wins.
+    /// Applies to files that have a preview: Markdown, SVG and GPUI stories.
+    ///
+    /// Default: {"*.gpui-story": "side"}
+    pub open_in_preview: Option<HashMap<String, OpenInPreview>>,
     /// The size of the workspace split drop targets on the outer edges.
     /// Given as a fraction that will be multiplied by the smaller dimension of the workspace.
     ///
@@ -421,6 +427,18 @@ pub enum WindowDecorations {
     /// The window manager or compositor draws the server-side window
     /// decorations (not supported by GNOME Wayland).
     Server,
+}
+
+/// How a file opens when it matches `open_in_preview`.
+#[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenInPreview {
+    /// Open the editor as usual.
+    Editor,
+    /// Show the preview in place of the editor.
+    Replace,
+    /// Keep the editor and show the preview in the pane to its right.
+    Side,
 }
 
 #[derive(

@@ -197,6 +197,14 @@
   "restore_on_file_reopen": true,
   // Whether to reveal an already open file in an existing pane instead of opening it in the active pane.
   "reveal_if_open": false,
+  // Files to open in their preview, keyed by glob pattern over the path in the
+  // project. "side" keeps the editor and shows the preview to its right,
+  // "replace" shows the preview instead of the editor and "editor" opens the
+  // editor only. When several patterns match a file, the longest wins.
+  // Applies to files that have a preview: Markdown, SVG and GPUI stories.
+  "open_in_preview": {
+    "*.gpui-story": "side"
+  },
   // Whether to automatically close files that have been deleted on disk.
   "close_on_file_delete": false,
   // Whether invoking a panel's ToggleFocus action while the panel is already

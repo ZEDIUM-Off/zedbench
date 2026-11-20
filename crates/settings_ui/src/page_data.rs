@@ -11132,7 +11132,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         ]
     }
 
-    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 4] {
+    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Image Viewer",
@@ -11150,6 +11150,25 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                         settings_content.image_viewer.get_or_insert_default().unit = value;
                     },
                 }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Open Files in Preview",
+                description: "Files to open in their preview, by glob pattern: \"side\", \"replace\" or \"editor\".",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("open_in_preview"),
+                        pick: |settings_content| {
+                            settings_content.workspace.open_in_preview.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.workspace.open_in_preview = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
                 metadata: None,
                 files: USER,
             }),

@@ -159,8 +159,8 @@ use util::{
 use uuid::Uuid;
 pub use workspace_settings::{
     AccessibleMode, AutosaveSetting, BottomDockLayout, EncodingDisplayOptions, FocusFollowsMouse,
-    RestoreOnStartupBehavior, StatusBarSettings, TabBarSettings, WorkspaceSettings,
-    closing_last_window_quits_app, observe_accessible_mode,
+    OpenInPreview, OpenInPreviewSettings, RestoreOnStartupBehavior, StatusBarSettings,
+    TabBarSettings, WorkspaceSettings, closing_last_window_quits_app, observe_accessible_mode,
 };
 use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
@@ -1553,6 +1553,15 @@ impl DelayedDebouncedEditAction {
             }
         }));
     }
+}
+
+/// How the `open_in_preview` setting opens `item`, when `item` is a project
+/// file that one of its patterns matches.
+pub fn open_in_preview_mode(item: &dyn ItemHandle, cx: &App) -> Option<OpenInPreview> {
+    let path = item.project_path(cx)?.path;
+    WorkspaceSettings::get_global(cx)
+        .open_in_preview
+        .mode_for(&path)
 }
 
 pub enum Event {

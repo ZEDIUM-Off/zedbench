@@ -40,6 +40,7 @@ use util::{
     paths::{PathStyle, PathWithPosition},
     rel_path::RelPath,
 };
+use workspace::OpenInPreview;
 use workspace::item::{
     Item, ItemBufferKind, ItemHandle, SaveOptions, SerializableItem, TabContentParams,
 };
@@ -151,9 +152,7 @@ impl MarkdownPreviewView {
                 {
                     return;
                 }
-                if !MarkdownPreviewSettings::get_global(cx).open_markdown_files_in_preview
-                    || workspace.is_restoring()
-                {
+                if workspace.is_restoring() {
                     return;
                 }
                 let Some(editor) = item.downcast::<Editor>() else {
@@ -162,9 +161,26 @@ impl MarkdownPreviewView {
                 if !Self::is_markdown_editor(workspace, &editor, cx) {
                     return;
                 }
+                // `open_in_preview` is the general setting; the Markdown-only
+                // one still applies to files no pattern matches.
+                let mode = workspace::open_in_preview_mode(item.as_ref(), cx).unwrap_or(
+                    if MarkdownPreviewSettings::get_global(cx).open_markdown_files_in_preview {
+                        OpenInPreview::Replace
+                    } else {
+                        OpenInPreview::Editor
+                    },
+                );
                 let Some(pane) = workspace.pane_for_item_id(item.item_id()) else {
                     return;
                 };
+                match mode {
+                    OpenInPreview::Editor => return,
+                    OpenInPreview::Side => {
+                        Self::open_preview_to_the_side_of_pane(workspace, editor, pane, window, cx);
+                        return;
+                    }
+                    OpenInPreview::Replace => {}
+                }
                 let replaces_editor = !item.is_dirty(cx);
                 let replaces_temporary_editor =
                     replaces_editor && pane.read(cx).is_active_preview_item(item.item_id());

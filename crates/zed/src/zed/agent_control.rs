@@ -30,7 +30,8 @@ usage: zedbench --agent [-w WINDOW] COMMAND
   press KEYS              type key strokes, such as `ctrl-shift-p` or `ctrl-k ctrl-s`
   snapshot [-i]           the window as an accessibility tree; -i keeps interactive nodes
   click REF               click a node from the last snapshot, such as `e12`
-  focus REF               focus a node from the last snapshot";
+  focus REF               focus a node from the last snapshot
+  hover REF               move the pointer over a node from the last snapshot";
 
 struct AgentSession {
     started: Instant,
@@ -102,6 +103,7 @@ pub fn run(args: Vec<String>, cx: &mut App) -> Result<String> {
         }
         "click" => perform(rest.first(), accesskit::Action::Click, cx),
         "focus" => perform(rest.first(), accesskit::Action::Focus, cx),
+        "hover" => perform(rest.first(), accesskit::Action::ShowTooltip, cx),
         _ => Err(anyhow!("unknown command {command:?}\n{USAGE}")),
     }
 }

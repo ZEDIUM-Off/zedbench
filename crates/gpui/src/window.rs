@@ -7395,6 +7395,18 @@ impl Window {
             accesskit::Action::Blur => {
                 self.blur(cx);
             }
+            // Tooltips and hover cards follow the pointer, so showing one
+            // moves the pointer over the node.
+            accesskit::Action::ShowTooltip => {
+                if let Some(bounds) = self.a11y.node_bounds.get(&request.target_node).copied() {
+                    let mouse_move = PlatformInput::MouseMove(crate::MouseMoveEvent {
+                        position: bounds.center(),
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    });
+                    self.dispatch_event(mouse_move, cx);
+                }
+            }
             _ => {
                 log::debug!(
                     "Unhandled a11y action: {:?} on {:?}",

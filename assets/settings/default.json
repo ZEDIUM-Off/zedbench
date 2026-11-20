@@ -203,7 +203,9 @@
   // editor only. When several patterns match a file, the longest wins.
   // Applies to files that have a preview: Markdown, SVG and GPUI stories.
   "open_in_preview": {
-    "*.gpui-story": "side"
+    "*.gpui-story": "replace",
+    "*.md": "replace",
+    "*.svg": "replace"
   },
   // Whether to automatically close files that have been deleted on disk.
   "close_on_file_delete": false,

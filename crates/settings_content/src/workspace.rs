@@ -79,7 +79,7 @@ pub struct WorkspaceSettingsContent {
     /// in the project. When several patterns match, the longest wins.
     /// Applies to files that have a preview: Markdown, SVG and GPUI stories.
     ///
-    /// Default: {"*.gpui-story": "side"}
+    /// Default: {"*.gpui-story": "replace", "*.md": "replace", "*.svg": "replace"}
     pub open_in_preview: Option<HashMap<String, OpenInPreview>>,
     /// The size of the workspace split drop targets on the outer edges.
     /// Given as a fraction that will be multiplied by the smaller dimension of the workspace.

@@ -17,11 +17,12 @@ use workspace::{Item, OpenInPreview, Pane, Workspace};
 
 mod openui_library;
 mod openui_story;
-mod story_mount;
+mod story_window;
 mod zed_theme;
 
 use openui::Library;
 use openui_story::OpenUiStory;
+use story_window::StoryWindow;
 
 actions!(
     storybook,
@@ -30,17 +31,11 @@ actions!(
         OpenCanvas,
         /// Previews the OpenUI story of the active `.gpui-story` file in a split.
         OpenCanvasToTheSide,
-        /// Mounts the slots of the active story in this window: leftDock,
-        /// rightDock and bottomDock as panels, statusStart and statusEnd in
-        /// the status bar.
-        MountStory,
-        /// Removes the story mounted in this window.
-        UnmountStory,
-        /// Toggles the left dock panel of the mounted story.
+        /// Toggles the left dock panel of a story shown in a window.
         ToggleStoryLeftDock,
-        /// Toggles the right dock panel of the mounted story.
+        /// Toggles the right dock panel of a story shown in a window.
         ToggleStoryRightDock,
-        /// Toggles the bottom dock panel of the mounted story.
+        /// Toggles the bottom dock panel of a story shown in a window.
         ToggleStoryBottomDock
     ]
 );
@@ -57,20 +52,14 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &OpenCanvasToTheSide, window, cx| {
             open_active(workspace, true, window, cx)
         });
-        workspace.register_action(|workspace, _: &MountStory, window, cx| {
-            story_mount::mount(workspace, window, cx)
-        });
-        workspace.register_action(|workspace, _: &UnmountStory, window, cx| {
-            story_mount::unmount(workspace, window, cx)
-        });
         workspace.register_action(|workspace, _: &ToggleStoryLeftDock, window, cx| {
-            story_mount::toggle::<story_mount::LeftDock>(workspace, window, cx)
+            story_window::toggle::<story_window::LeftDock>(workspace, window, cx)
         });
         workspace.register_action(|workspace, _: &ToggleStoryRightDock, window, cx| {
-            story_mount::toggle::<story_mount::RightDock>(workspace, window, cx)
+            story_window::toggle::<story_window::RightDock>(workspace, window, cx)
         });
         workspace.register_action(|workspace, _: &ToggleStoryBottomDock, window, cx| {
-            story_mount::toggle::<story_mount::BottomDock>(workspace, window, cx)
+            story_window::toggle::<story_window::BottomDock>(workspace, window, cx)
         });
         let Some(window) = window else {
             return;
@@ -210,6 +199,8 @@ struct StoryCanvas {
     project: Entity<Project>,
     library: Result<Library, SharedString>,
     story: Option<(Entity<OpenUiStory>, Entity<Root>)>,
+    /// The real window the story extends, or why it could not be built.
+    window: Option<Result<StoryWindow, SharedString>>,
     /// The stories this one extends, opened once and followed on edit.
     bases: HashMap<ProjectPath, Result<Entity<Buffer>, SharedString>>,
     opening: HashMap<ProjectPath, Task<()>>,
@@ -222,6 +213,8 @@ struct StoryCanvas {
 /// The story followed by the stories it extends, or why the chain stops.
 struct Chain {
     sources: Vec<String>,
+    /// Whether the last story of the chain extends the real window.
+    window: bool,
     missing: Option<ProjectPath>,
     problem: Option<SharedString>,
 }
@@ -241,6 +234,7 @@ impl StoryCanvas {
             library: openui_library::library()
                 .map_err(|error| format!("Invalid story library: {error}").into()),
             story: None,
+            window: None,
             bases: HashMap::default(),
             opening: HashMap::default(),
             problem: None,
@@ -263,6 +257,7 @@ impl StoryCanvas {
         let buffer = self.source.read(cx);
         let mut chain = Chain {
             sources: vec![buffer.text()],
+            window: false,
             missing: None,
             problem: None,
         };
@@ -313,6 +308,12 @@ impl StoryCanvas {
                 }
             }
         }
+        chain.window = chain.missing.is_none()
+            && chain.problem.is_none()
+            && chain
+                .sources
+                .last()
+                .is_some_and(|source| openui_library::extends_window(source));
         chain
     }
 
@@ -373,15 +374,30 @@ impl StoryCanvas {
         let Ok(library) = &self.library else {
             return;
         };
-        match &self.story {
+        let story = match &self.story {
             Some((story, _)) => {
                 story.update(cx, |story, cx| story.set_source(library, &text, cx));
+                story.clone()
             }
             None => {
                 let story = cx.new(|_| OpenUiStory::new(library, &text));
                 let root = cx.new(|cx| Root::new(story.clone(), window, cx));
-                self.story = Some((story, root));
+                self.story = Some((story.clone(), root));
+                story
             }
+        };
+        if chain.window {
+            match &self.window {
+                Some(Ok(story_window)) => story_window.sync(&story, window, cx),
+                Some(Err(_)) => {}
+                None => {
+                    self.window = Some(
+                        StoryWindow::new(&story, window, cx).map_err(SharedString::from),
+                    );
+                }
+            }
+        } else {
+            self.window = None;
         }
         cx.notify();
     }
@@ -395,13 +411,20 @@ impl Render for StoryCanvas {
             .track_focus(&self.focus)
             .size_full();
         match (&self.library, &self.story) {
-            (Ok(_), Some((_, root))) => canvas
-                .flex()
-                .flex_col()
-                .when_some(self.problem.clone(), |canvas, problem| {
-                    canvas.child(div().flex_none().px_2().py_1().text_sm().child(problem))
-                })
-                .child(div().flex_1().min_h_0().child(root.clone())),
+            (Ok(_), Some((_, root))) => {
+                let body = match &self.window {
+                    Some(Ok(story_window)) => story_window.workspace().clone().into_any_element(),
+                    Some(Err(error)) => div().p_4().child(error.clone()).into_any_element(),
+                    None => root.clone().into_any_element(),
+                };
+                canvas
+                    .flex()
+                    .flex_col()
+                    .when_some(self.problem.clone(), |canvas, problem| {
+                        canvas.child(div().flex_none().px_2().py_1().text_sm().child(problem))
+                    })
+                    .child(div().flex_1().min_h_0().child(body))
+            }
             (Err(error), _) => canvas
                 .flex()
                 .items_center()

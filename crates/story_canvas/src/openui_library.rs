@@ -179,15 +179,29 @@ pub fn library() -> Result<Library, LibraryError> {
 /// A story may extend a story that extends another, up to this depth.
 pub const MAX_EXTENDS: usize = 4;
 
-/// The story a story extends, from a first line `# extends: <path>`. The
-/// path is relative to the story's directory.
-pub fn extended_story(source: &str) -> Option<&str> {
+/// The base a story names to be shown in a real Zedbench window rather
+/// than on its own. It is not a file: the canvas builds the window from
+/// Zedbench's sources.
+pub const WINDOW_BASE: &str = "zed/window";
+
+fn extends(source: &str) -> Option<&str> {
     source
         .lines()
         .take_while(|line| line.trim_start().starts_with('#'))
         .find_map(|line| line.trim_start().strip_prefix('#')?.trim().strip_prefix("extends:"))
         .map(str::trim)
         .filter(|path| !path.is_empty())
+}
+
+/// The story a story extends, from a first line `# extends: <path>`. The
+/// path is relative to the story's directory.
+pub fn extended_story(source: &str) -> Option<&str> {
+    extends(source).filter(|path| *path != WINDOW_BASE)
+}
+
+/// Whether the story extends the real window, `# extends: zed/window`.
+pub fn extends_window(source: &str) -> bool {
+    extends(source) == Some(WINDOW_BASE)
 }
 
 /// Resolves `target` against the directory of `story`, both relative and

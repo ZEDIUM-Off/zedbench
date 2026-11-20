@@ -19736,6 +19736,7 @@ dependencies = [
  "log",
  "multi_buffer",
  "openui",
+ "paths",
  "project",
  "serde_json",
  "settings",

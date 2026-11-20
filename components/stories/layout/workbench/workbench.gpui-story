@@ -1,12 +1,14 @@
+# extends: zed/window
 # Workbench: machines, workspaces, worktrees, layouts and sessions.
-# Mount it in the real window with "storybook: mount story": every slot below
-# goes to its place in Zedbench, and the rest of the window stays the real one.
+# The preview opens a real Zedbench window on a made-up project, built from
+# Zedbench's own sources, and adds each slot below to it:
 # - leftDock: the Workbench. Machines, their workspaces, the worktrees and
 #   layouts of the open workspace;
 # - rightDock: Sessions. Agents and terminals that hc keeps alive, and the
 #   history of every session that ended;
 # - statusStart, statusEnd: the active layout, and the agents waiting on you.
-# The preview below lays the same slots side by side.
+# `root` lays the same slots side by side, for tools that read the story
+# without a window.
 
 $workspace = "app"
 $worktree = "checkout"

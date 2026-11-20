@@ -1,0 +1,119 @@
+# extends: zed/window
+# Layout header: each level of the workbench has a fixed place.
+# - titleStart: the workspace, and the machine it runs on. A click opens the
+#   switcher in titleCenter, which lists every workspace of every machine.
+# - titleCenter: the layouts of the workspace, as tabs. A layout is a concrete
+#   arrangement of panes, saved as you change it; switching keeps each one.
+# - titleEnd: what needs you, across every workspace. A click lists it in the
+#   right dock, and each entry leads to its workspace, layout and pane.
+# - leftDock: the inventory of the workspace. Its worktrees, and what runs in
+#   each of them, whatever layout shows it.
+# - statusStart: the worktree new instances of the layout start in.
+# Every name and session below is made up.
+
+$workspace = "app"
+$layout = "app-impl"
+$switching = false
+$inbox = false
+
+machines = [
+  {id: "local", name: "workstation", badge: ""},
+  {id: "build", name: "buildbox", badge: "ssh buildbox"}
+]
+
+workspaces = [
+  {id: "app", machine: "local", name: "acme-app", layout: "app-impl"},
+  {id: "api", machine: "build", name: "acme-api", layout: "api-runs"},
+  {id: "notes", machine: "local", name: "research-notes", layout: "notes-read"}
+]
+
+layouts = [
+  {id: "app-impl", workspace: "app", name: "Implement", key: "1", worktree: "feat/checkout"},
+  {id: "app-review", workspace: "app", name: "Review", key: "2", worktree: "main"},
+  {id: "app-agents", workspace: "app", name: "Agents", key: "3", worktree: "feat/checkout"},
+  {id: "api-runs", workspace: "api", name: "Runs", key: "1", worktree: "feat/rate-limit"},
+  {id: "api-debug", workspace: "api", name: "Debug", key: "2", worktree: "main"},
+  {id: "notes-read", workspace: "notes", name: "Read", key: "1", worktree: "main"}
+]
+
+worktrees = [
+  {id: "app-main", workspace: "app", branch: "main", detail: ""},
+  {id: "checkout", workspace: "app", branch: "feat/checkout", detail: "+12 · 4 changed"},
+  {id: "login", workspace: "app", branch: "fix/login-timeout", detail: "+3"},
+  {id: "api-main", workspace: "api", branch: "main", detail: ""},
+  {id: "limits", workspace: "api", branch: "feat/rate-limit", detail: "+7 · 2 changed"},
+  {id: "notes-main", workspace: "notes", branch: "main", detail: "1 changed"}
+]
+
+instances = [
+  {id: "a1", workspace: "app", worktree: "checkout", kind: "agent", name: "Checkout flow", status: "working", layout: "app-impl"},
+  {id: "a2", workspace: "app", worktree: "checkout", kind: "agent", name: "Review checkout", status: "blocked", layout: "app-review"},
+  {id: "a3", workspace: "app", worktree: "login", kind: "agent", name: "Login timeout", status: "done", layout: "app-agents"},
+  {id: "s1", workspace: "app", worktree: "checkout", kind: "terminal", name: "cargo watch -x test", status: "live", layout: "app-impl"},
+  {id: "s2", workspace: "app", worktree: "app-main", kind: "terminal", name: "Shell", status: "live", layout: "app-review"},
+  {id: "a4", workspace: "api", worktree: "limits", kind: "agent", name: "Rate limiter", status: "blocked", layout: "api-runs"},
+  {id: "s3", workspace: "api", worktree: "api-main", kind: "terminal", name: "Load test", status: "live", layout: "api-debug"},
+  {id: "a5", workspace: "notes", worktree: "notes-main", kind: "agent", name: "Summarize papers", status: "done", layout: "notes-read"}
+]
+
+ws = @First(@Filter(workspaces, "id", "==", $workspace))
+machine = @First(@Filter(machines, "id", "==", ws.machine))
+current = @First(@Filter(layouts, "id", "==", $layout))
+myLayouts = @Filter(layouts, "workspace", "==", $workspace)
+myWorktrees = @Filter(worktrees, "workspace", "==", $workspace)
+myInstances = @Filter(instances, "workspace", "==", $workspace)
+waiting = @Filter(instances, "status", "==", "blocked")
+finished = @Filter(instances, "status", "==", "done")
+nothing = Column([], {width: 0})
+
+root = Column([
+  Row([titleStart, Spacer(), titleCenter, Spacer(), titleEnd], {gap: 6, padding: 4, surface: "title_bar"}),
+  Divider(),
+  Row([leftDock, Divider(), Column([Text("The real panes of the window go here.", "muted")], {grow: true, padding: 12}), Divider(), $inbox ? rightDock : nothing], {grow: true, align: "stretch"}),
+  Divider(),
+  Row([statusStart], {padding: 2, surface: "status_bar"})
+], {grow: true})
+
+titleStart = Row([
+  Button(ws.name, @Set($switching, !$switching), "ghost", $switching, "folder"),
+  machine.badge != "" ? Tag(machine.badge, "info") : nothing
+], {gap: 4})
+
+titleCenter = $switching ? switcher : layoutTabs
+
+layoutTabs = Row([
+  Row(@Each(myLayouts, "l", Button(l.name + "  " + l.key, @Set($layout, l.id), "ghost", $layout == l.id)), {gap: 2}),
+  Button("", @ToAssistant("New layout in " + ws.name), "ghost", false, "plus")
+], {gap: 2})
+
+switcher = Row([
+  Text("Switch to", "small"),
+  Row(@Each(workspaces, "w", Button(w.name, Action([@Set($workspace, w.id), @Set($layout, w.layout), @Set($switching, false)]), "ghost", $workspace == w.id)), {gap: 2}),
+  Button("", @ToAssistant("Open a workspace"), "ghost", false, "plus")
+], {gap: 4})
+
+titleEnd = Button(@Count(waiting) + " waiting", @Set($inbox, !$inbox), @Count(waiting) > 0 ? "danger" : "ghost", $inbox, "bell")
+
+leftDock = Column([
+  Row([Text(ws.name, "heading"), Spacer(), Text(machine.name, "small")], {gap: 6, padding: 6}),
+  Column(@Each(myWorktrees, "t", Column([
+    ListItem(t.branch, null, current.worktree == t.branch, "git_branch", t.detail),
+    Column(@Each(@Filter(myInstances, "worktree", "==", t.id), "i",
+      ListItem(i.name, @Set($layout, i.layout), false, i.kind == "agent" ? "zed_agent" : "terminal", @First(@Filter(layouts, "id", "==", i.layout)).name, 1, [
+        Tag(i.status, i.status == "blocked" ? "danger" : i.status == "working" ? "warning" : i.status == "done" ? "success" : "secondary")
+      ])
+    ))
+  ], {gap: 2})), {gap: 6, grow: true, scroll: true, padding: 4})
+], {grow: true, surface: "panel"})
+
+rightDock = Column([
+  Text("Needs you", "heading"),
+  Column(@Each(waiting, "i", ListItem(i.name, Action([@Set($workspace, i.workspace), @Set($layout, i.layout), @Set($inbox, false)]), false, "zed_agent", @First(@Filter(workspaces, "id", "==", i.workspace)).name + " · " + @First(@Filter(layouts, "id", "==", i.layout)).name, 0, [Tag("blocked", "danger")]))),
+  Text("Finished", "muted"),
+  Column(@Each(finished, "i", ListItem(i.name, Action([@Set($workspace, i.workspace), @Set($layout, i.layout), @Set($inbox, false)]), false, "zed_agent", @First(@Filter(workspaces, "id", "==", i.workspace)).name + " · " + @First(@Filter(layouts, "id", "==", i.layout)).name, 0, [Tag("done", "success")])))
+], {grow: true, padding: 6, gap: 6, surface: "panel", scroll: true})
+
+statusStart = Row([
+  Icon("split", "muted"),
+  Text(current.name + " · new instances start in " + current.worktree, "small")
+], {gap: 4})

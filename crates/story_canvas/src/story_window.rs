@@ -12,6 +12,7 @@ use gpui::{
     Render, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_kit::base::Root;
+use title_bar::{TitleBar, TitleBarSlot};
 use project::trusted_worktrees::{PathTrust, TrustedWorktrees};
 use project::{LocalProjectFlags, Project, ProjectPath};
 use util::ResultExt as _;
@@ -160,6 +161,17 @@ impl StoryWindow {
             workspace,
         };
         story_window.sync(story, window, cx);
+        // The title bar is added by an observer of new workspaces, which runs
+        // only once the current update ends.
+        window.defer(cx, {
+            let workspace = story_window.workspace.downgrade();
+            let story = story.downgrade();
+            move |window, cx| {
+                if let (Some(workspace), Some(story)) = (workspace.upgrade(), story.upgrade()) {
+                    sync_title(&workspace, &story, window, cx);
+                }
+            }
+        });
         Ok(story_window)
     }
 
@@ -250,6 +262,7 @@ impl StoryWindow {
             sync_status::<StatusStart>(workspace, story, window, cx);
             sync_status::<StatusEnd>(workspace, story, window, cx);
         });
+        sync_title(&self.workspace, story, window, cx);
     }
 }
 
@@ -444,6 +457,42 @@ fn sync_status<S: StatusSlot>(
         }
         _ => {}
     }
+}
+
+const TITLE_SLOTS: [(&str, TitleBarSlot); 3] = [
+    ("titleStart", TitleBarSlot::Start),
+    ("titleCenter", TitleBarSlot::Center),
+    ("titleEnd", TitleBarSlot::End),
+];
+
+/// Draws the window's title bar without the controls that would act on the
+/// real window, and adds the title slots the story defines.
+fn sync_title(
+    workspace: &Entity<Workspace>,
+    story: &Entity<OpenUiStory>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(title_bar) = workspace
+        .read(cx)
+        .titlebar_item()
+        .and_then(|item| item.downcast::<TitleBar>().ok())
+    else {
+        return;
+    };
+    title_bar.update(cx, |title_bar, cx| {
+        title_bar.set_embedded(cx);
+        for (name, slot) in TITLE_SLOTS {
+            match (title_bar.slot(slot).is_some(), story.read(cx).defines(name)) {
+                (true, false) => title_bar.set_slot(slot, None, cx),
+                (false, true) => {
+                    let root = slot_root(story, name, window, cx);
+                    title_bar.set_slot(slot, Some(root.into()), cx);
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 pub(crate) fn toggle<D: DockSlot>(

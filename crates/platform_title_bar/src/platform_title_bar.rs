@@ -56,6 +56,7 @@ pub struct PlatformTitleBar {
     system_window_tabs: Entity<SystemWindowTabs>,
     button_layout: Option<WindowButtonLayout>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+    embedded: bool,
 }
 
 impl PlatformTitleBar {
@@ -71,7 +72,15 @@ impl PlatformTitleBar {
             system_window_tabs,
             button_layout: None,
             multi_workspace: None,
+            embedded: false,
         }
+    }
+
+    /// Marks a title bar drawn inside another view of the window, such as a
+    /// story preview. Its window controls, drag area and gestures would act
+    /// on the real window, so it renders none of them.
+    pub fn set_embedded(&mut self, embedded: bool) {
+        self.embedded = embedded;
     }
 
     pub fn with_multi_workspace(mut self, multi_workspace: WeakEntity<MultiWorkspace>) -> Self {
@@ -215,11 +224,15 @@ impl Render for PlatformTitleBar {
         let button_layout = self.effective_button_layout(&decorations, cx);
         let sidebar = self.sidebar_render_state(cx);
 
+        let owns_window = !self.embedded;
+
         let title_bar = h_flex()
-            .window_control_area(WindowControlArea::Drag)
+            .when(owns_window, |this| {
+                this.window_control_area(WindowControlArea::Drag)
+            })
             .w_full()
             .h(height)
-            .map(|this| {
+            .when(owns_window, |this| {
                 this.on_mouse_down_out(cx.listener(move |this, _ev, _window, _cx| {
                     this.should_move = false;
                 }))
@@ -245,7 +258,7 @@ impl Render for PlatformTitleBar {
             .map(|this| {
                 // Note: On Windows the title bar behavior is handled by the platform implementation.
                 this.id(self.id.clone())
-                    .when(self.platform_style == PlatformStyle::Mac, |this| {
+                    .when(owns_window && self.platform_style == PlatformStyle::Mac, |this| {
                         this.on_click(|event, window, _| {
                             if event.click_count() == 2 {
                                 window.titlebar_double_click();
@@ -253,7 +266,8 @@ impl Render for PlatformTitleBar {
                         })
                     })
                     .when(
-                        self.platform_style == PlatformStyle::Linux
+                        owns_window
+                            && self.platform_style == PlatformStyle::Linux
                             && supported_controls.maximize
                             && window.is_resizable(),
                         |this| {
@@ -266,7 +280,8 @@ impl Render for PlatformTitleBar {
                     )
             })
             .map(|this| {
-                let show_left_controls = !(sidebar.open && sidebar.side == SidebarSide::Left);
+                let show_left_controls =
+                    owns_window && !(sidebar.open && sidebar.side == SidebarSide::Left);
 
                 if window.is_fullscreen() || window.is_simple_fullscreen() {
                     this.pl_2()
@@ -289,6 +304,7 @@ impl Render for PlatformTitleBar {
             })
             .map(|el| match decorations {
                 Decorations::Server => el,
+                Decorations::Client { .. } if !owns_window => el,
                 Decorations::Client { tiling, .. } => el
                     .when(
                         !(tiling.top || tiling.right)
@@ -322,7 +338,8 @@ impl Render for PlatformTitleBar {
             .when(
                 !window.is_fullscreen() && !window.is_simple_fullscreen(),
                 |title_bar| {
-                    let show_right_controls = !(sidebar.open && sidebar.side == SidebarSide::Right);
+                    let show_right_controls =
+                        owns_window && !(sidebar.open && sidebar.side == SidebarSide::Right);
 
                     let title_bar = title_bar.children(
                         show_right_controls
@@ -336,7 +353,8 @@ impl Render for PlatformTitleBar {
                             .flatten(),
                     );
 
-                    if self.platform_style == PlatformStyle::Linux
+                    if owns_window
+                        && self.platform_style == PlatformStyle::Linux
                         && matches!(decorations, Decorations::Client { .. })
                     {
                         title_bar.when(supported_controls.window_menu, |titlebar| {

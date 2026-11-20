@@ -32,7 +32,8 @@ use client::{Client, UserStore, zed_urls};
 use command_palette_hooks::CommandPaletteFilter;
 
 use gpui::{
-    Action, Anchor, Animation, AnimationExt, AnyElement, App, Context, Element, Entity, Focusable,
+    Action, Anchor, Animation, AnimationExt, AnyElement, AnyView, App, Context, Element, Entity,
+    Focusable,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, actions, div,
     pulsating_between,
@@ -215,6 +216,20 @@ pub struct TitleBar {
     #[cfg(feature = "call")]
     screen_share_popover_handle: ui::PopoverMenuHandle<ContextMenu>,
     _diagnostics_subscription: Option<gpui::Subscription>,
+    start_slot: Option<AnyView>,
+    center_slot: Option<AnyView>,
+    end_slot: Option<AnyView>,
+}
+
+/// A place in the title bar where another crate can add a view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitleBarSlot {
+    /// After the project and branch.
+    Start,
+    /// Between the project and the user menu.
+    Center,
+    /// Before the user menu.
+    End,
 }
 
 impl Render for TitleBar {
@@ -342,12 +357,22 @@ impl Render for TitleBar {
                                 )
                         })
                 })
+                .children(self.start_slot.clone())
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .into_any_element(),
         );
 
         #[cfg(feature = "call")]
         children.push(self.render_collaborator_list(window, cx).into_any_element());
+
+        if let Some(center) = self.center_slot.clone() {
+            children.push(
+                h_flex()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(center)
+                    .into_any_element(),
+            );
+        }
 
         if title_bar_settings.show_onboarding_banner {
             if let Some(banner) = &self.banner {
@@ -381,6 +406,7 @@ impl Render for TitleBar {
                 .pr_1()
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .children(self.end_slot.clone())
                 .children(call_controls)
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
@@ -543,12 +569,41 @@ impl TitleBar {
             #[cfg(feature = "call")]
             screen_share_popover_handle: ui::PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
+            start_slot: None,
+            center_slot: None,
+            end_slot: None,
         };
 
         #[cfg(feature = "call")]
         this.observe_diagnostics(cx);
 
         this
+    }
+
+    /// Draws this title bar inside another view of the window, without the
+    /// controls and gestures that act on the window itself.
+    pub fn set_embedded(&mut self, cx: &mut Context<Self>) {
+        self.platform_titlebar
+            .update(cx, |titlebar, _| titlebar.set_embedded(true));
+        cx.notify();
+    }
+
+    pub fn slot(&self, slot: TitleBarSlot) -> Option<&AnyView> {
+        match slot {
+            TitleBarSlot::Start => self.start_slot.as_ref(),
+            TitleBarSlot::Center => self.center_slot.as_ref(),
+            TitleBarSlot::End => self.end_slot.as_ref(),
+        }
+    }
+
+    pub fn set_slot(&mut self, slot: TitleBarSlot, view: Option<AnyView>, cx: &mut Context<Self>) {
+        let target = match slot {
+            TitleBarSlot::Start => &mut self.start_slot,
+            TitleBarSlot::Center => &mut self.center_slot,
+            TitleBarSlot::End => &mut self.end_slot,
+        };
+        *target = view;
+        cx.notify();
     }
 
     fn worktree_count(&self, cx: &App) -> usize {

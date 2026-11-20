@@ -21,7 +21,7 @@ use std::mem;
 use std::{
     env::{
         self,
-        consts::{ARCH, OS},
+        consts::OS,
     },
     ffi::OsStr,
     ffi::OsString,
@@ -285,7 +285,9 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
         let updater = AutoUpdater::new(version, client, cx);
 
         let poll_for_updates = ReleaseChannel::try_global(cx)
-            .map(|channel| channel.poll_for_updates() || PRIVATE_WINDOWS_FEED.is_some())
+            // Zedbench only updates from its private feed: Zed's own releases would
+            // replace it with upstream Zed.
+            .map(|_| PRIVATE_WINDOWS_FEED.is_some())
             .unwrap_or(false);
 
         if option_env!("ZED_UPDATE_EXPLANATION").is_none()
@@ -329,7 +331,9 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 
     if !ReleaseChannel::try_global(cx)
-        .map(|channel| channel.poll_for_updates() || PRIVATE_WINDOWS_FEED.is_some())
+        // Zedbench only updates from its private feed: Zed's own releases would
+            // replace it with upstream Zed.
+            .map(|_| PRIVATE_WINDOWS_FEED.is_some())
         .unwrap_or(false)
     {
         return;
@@ -777,7 +781,7 @@ impl AutoUpdater {
             anyhow::ensure!(release.url == expected.as_str(), "unexpected private installer URL");
             release
         } else {
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?
+            anyhow::bail!("this Zedbench build has no update channel");
         };
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));

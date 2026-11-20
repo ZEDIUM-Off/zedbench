@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Pixels,
+    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Pixels,
     Render, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_kit::base::Root;
@@ -224,8 +224,20 @@ impl StoryWindow {
         })
     }
 
-    pub(crate) fn workspace(&self) -> &Entity<Workspace> {
-        &self.workspace
+    /// The workspace with its actions and key context. A real window gets
+    /// them from `MultiWorkspace`; without them, every action dispatched in
+    /// the preview bubbles up to the window's own workspace and acts on it.
+    pub(crate) fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let workspace = self.workspace.clone();
+        let key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
+        workspace
+            .update(cx, |workspace, cx| {
+                workspace.actions(div().flex(), window, cx)
+            })
+            .key_context(key_context)
+            .size_full()
+            .child(workspace)
+            .into_any_element()
     }
 
     /// Adds the slots the story defines and removes those it no longer

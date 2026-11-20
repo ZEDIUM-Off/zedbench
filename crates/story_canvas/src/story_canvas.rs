@@ -404,7 +404,7 @@ impl StoryCanvas {
 }
 
 impl Render for StoryCanvas {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let canvas = div()
             .id("gpui-story-canvas")
             .key_context("StoryCanvas")
@@ -413,7 +413,7 @@ impl Render for StoryCanvas {
         match (&self.library, &self.story) {
             (Ok(_), Some((_, root))) => {
                 let body = match &self.window {
-                    Some(Ok(story_window)) => story_window.workspace().clone().into_any_element(),
+                    Some(Ok(story_window)) => story_window.render(window, cx),
                     Some(Err(error)) => div().p_4().child(error.clone()).into_any_element(),
                     None => root.clone().into_any_element(),
                 };

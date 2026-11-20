@@ -1,0 +1,194 @@
+# extends: ../../zed/window.gpui-story
+# Workbench: machines, workspaces, worktrees, layouts and sessions, added to
+# the real Zedbench window. Only these slots change:
+# - sidebar: the Workbench, outside the workspace, where Zed puts its
+#   threads sidebar. Machines, their workspaces, the worktrees of the open one;
+# - titleEnd: the layouts of the workspace;
+# - leftDock: Zed's Project Panel and Git Panel, scoped to the worktree;
+# - center: the panes of the active layout;
+# - rightDock: Sessions. Agents and terminals that hc keeps alive, and the
+#   history of every session that ended, like a list of past threads.
+
+$leftOpen = true
+$rightOpen = true
+$bottomOpen = false
+$workspace = "app"
+$worktree = "checkout"
+$layout = "app-impl"
+$rail = false
+$dockTab = 0
+$sessionsTab = 0
+$onlyWorktree = false
+$historyKind = 0
+$query = ""
+
+machines = [
+  {id: "local", name: "workstation", detail: "this machine", icon: "screen"},
+  {id: "build", name: "buildbox", detail: "ssh · 14 sessions", icon: "server"}
+]
+
+workspaces = [
+  {id: "app", machine: "local", name: "acme-app", layout: "app-impl"},
+  {id: "api", machine: "build", name: "acme-api", layout: "api-runs"},
+  {id: "design", machine: "local", name: "design-system", layout: "ds-edit"},
+  {id: "dots", machine: "local", name: "dotfiles", layout: "dots-edit"}
+]
+
+worktrees = [
+  {id: "app-main", workspace: "app", branch: "main", path: "acme-app", ahead: "", changes: 0},
+  {id: "checkout", workspace: "app", branch: "feat/checkout", path: ".worktrees/checkout", ahead: "+12", changes: 4},
+  {id: "login", workspace: "app", branch: "fix/login-timeout", path: ".worktrees/login-timeout", ahead: "+3", changes: 0},
+  {id: "api-main", workspace: "api", branch: "main", path: "acme-api", ahead: "", changes: 0},
+  {id: "limits", workspace: "api", branch: "feat/rate-limit", path: ".worktrees/rate-limit", ahead: "+7", changes: 2},
+  {id: "ds-main", workspace: "design", branch: "main", path: "design-system", ahead: "", changes: 1},
+  {id: "dots-main", workspace: "dots", branch: "main", path: "dotfiles", ahead: "", changes: 0}
+]
+
+# Live sessions come from hc; kind is the label zedbench.kind, or the program
+# hc reports (pi, claude, codex → agent). Sessions with status "off" ended:
+# they come from the agents' own session files, and can be resumed.
+sessions = [
+  {id: "t11", workspace: "app", worktree: "checkout", kind: "agent", program: "pi", name: "Checkout flow", status: "working", turn: 62, when: "now"},
+  {id: "t12", workspace: "app", worktree: "checkout", kind: "agent", program: "pi", name: "Review checkout", status: "blocked", turn: 4, when: "now"},
+  {id: "t13", workspace: "app", worktree: "login", kind: "agent", program: "codex", name: "Login timeout", status: "done", turn: 38, when: "12 min ago"},
+  {id: "t14", workspace: "app", worktree: "app-main", kind: "agent", program: "pi", name: "Release notes", status: "idle", turn: 7, when: "1 h ago"},
+  {id: "t15", workspace: "app", worktree: "checkout", kind: "terminal", program: "zsh", name: "cargo watch -x test", status: "live", turn: 0, when: "now"},
+  {id: "t16", workspace: "app", worktree: "app-main", kind: "terminal", program: "zsh", name: "Shell", status: "live", turn: 0, when: "now"},
+  {id: "h1", workspace: "app", worktree: "checkout", kind: "agent", program: "pi", name: "Plan checkout", status: "off", turn: 21, when: "Today 09:40"},
+  {id: "h2", workspace: "app", worktree: "login", kind: "agent", program: "pi", name: "Reproduce login bug", status: "off", turn: 15, when: "Yesterday"},
+  {id: "h3", workspace: "app", worktree: "app-main", kind: "terminal", program: "zsh", name: "cargo build --release", status: "off", turn: 0, when: "Yesterday"},
+  {id: "h4", workspace: "app", worktree: "app-main", kind: "agent", program: "claude", name: "Upgrade dependencies", status: "off", turn: 44, when: "Mon"},
+  {id: "h5", workspace: "app", worktree: "app-main", kind: "agent", program: "pi", name: "Write onboarding docs", status: "off", turn: 9, when: "Last week"},
+  {id: "t21", workspace: "api", worktree: "limits", kind: "agent", program: "pi", name: "Rate limiter", status: "working", turn: 15, when: "now"},
+  {id: "t22", workspace: "api", worktree: "api-main", kind: "terminal", program: "sh", name: "Shell", status: "live", turn: 0, when: "now"},
+  {id: "h6", workspace: "api", worktree: "limits", kind: "agent", program: "pi", name: "Design limits", status: "off", turn: 30, when: "Yesterday"},
+  {id: "t31", workspace: "design", worktree: "ds-main", kind: "terminal", program: "zsh", name: "pnpm storybook", status: "live", turn: 0, when: "now"}
+]
+
+layouts = [
+  {id: "app-impl", workspace: "app", name: "Implement", key: "1"},
+  {id: "app-review", workspace: "app", name: "Review", key: "2"},
+  {id: "app-agents", workspace: "app", name: "Agents", key: "3"},
+  {id: "api-runs", workspace: "api", name: "Runs", key: "1"},
+  {id: "ds-edit", workspace: "design", name: "Edit", key: "1"},
+  {id: "dots-edit", workspace: "dots", name: "Edit", key: "1"}
+]
+
+# A pane shows any instance; its branch chip says where it comes from.
+panes = [
+  {layout: "app-impl", kind: "editor", tabs: [{label: "checkout.rs", icon: "file_rust", dirty: true}, {label: "cart.rs", icon: "file_rust"}], worktree: "checkout", body: "pub fn checkout(cart: &Cart) -> Result<Order> {\n    let total = cart.total()?;\n    payments::charge(total)?;\n    Ok(Order::from(cart))\n}"},
+  {layout: "app-impl", kind: "terminal", tabs: [{label: "t15", icon: "terminal", detail: "cargo watch"}], worktree: "checkout", body: "test cart::total ... ok\ntest checkout::charges ... FAILED\n\nexpected 1 order, got 0"},
+  {layout: "app-review", kind: "terminal", tabs: [{label: "t12", icon: "zed_agent", detail: "Review checkout"}], worktree: "checkout", body: "Should a failed charge keep the cart?\n> "},
+  {layout: "app-review", kind: "editor", tabs: [{label: "Diff main…feat/checkout", icon: "git_branch"}], worktree: "checkout", body: "M src/checkout.rs\nM src/cart.rs\nA tests/checkout.rs"},
+  {layout: "app-agents", kind: "terminal", tabs: [{label: "t11", icon: "zed_agent", detail: "Checkout flow"}], worktree: "checkout", body: "Working · turn 62"},
+  {layout: "app-agents", kind: "terminal", tabs: [{label: "t13", icon: "zed_agent", detail: "Login timeout"}], worktree: "login", body: "Done · ready for the next prompt"},
+  {layout: "app-agents", kind: "terminal", tabs: [{label: "t21", icon: "zed_agent", detail: "Rate limiter"}], worktree: "limits", body: "From acme-api: a layout may show another workspace's agent"},
+  {layout: "api-runs", kind: "terminal", tabs: [{label: "t21", icon: "zed_agent", detail: "Rate limiter"}], worktree: "limits", body: "Working · turn 15"},
+  {layout: "ds-edit", kind: "editor", tabs: [{label: "button.tsx", icon: "file"}], worktree: "ds-main", body: "export function Button(props: ButtonProps) {\n  return <button {...props} />\n}"},
+  {layout: "dots-edit", kind: "editor", tabs: [{label: "config.toml", icon: "file"}], worktree: "dots-main", body: "[editor]\ntheme = \"one-dark\""}
+]
+
+files = [
+  {worktree: "checkout", name: "src", depth: 0, icon: "folder_open", state: ""},
+  {worktree: "checkout", name: "checkout.rs", depth: 1, icon: "file_rust", state: "M"},
+  {worktree: "checkout", name: "cart.rs", depth: 1, icon: "file_rust", state: "M"},
+  {worktree: "checkout", name: "tests", depth: 0, icon: "folder_open", state: ""},
+  {worktree: "checkout", name: "checkout.rs", depth: 1, icon: "file_rust", state: "A"},
+  {worktree: "checkout", name: "Cargo.toml", depth: 0, icon: "file", state: "M"},
+  {worktree: "app-main", name: "src", depth: 0, icon: "folder", state: ""},
+  {worktree: "app-main", name: "Cargo.toml", depth: 0, icon: "file", state: ""},
+  {worktree: "login", name: "src", depth: 0, icon: "folder_open", state: ""},
+  {worktree: "login", name: "session.rs", depth: 1, icon: "file_rust", state: ""}
+]
+
+ws = @First(@Filter(workspaces, "id", "==", $workspace))
+machine = @First(@Filter(machines, "id", "==", ws.machine))
+wt = @First(@Filter(worktrees, "id", "==", $worktree))
+current = @First(@Filter(layouts, "id", "==", $layout))
+project = {name: ws.name, branch: wt.branch, machine: machine.name}
+myLayouts = @Filter(layouts, "workspace", "==", $workspace)
+mySessions = @Filter(sessions, "workspace", "==", $workspace)
+scoped = $onlyWorktree ? @Filter(mySessions, "worktree", "==", $worktree) : mySessions
+live = @Filter(@Filter(scoped, "status", "!=", "off"), "name", "contains", $query)
+agents = @Filter(live, "kind", "==", "agent")
+terms = @Filter(live, "kind", "==", "terminal")
+ended = @Filter(@Filter(scoped, "status", "==", "off"), "name", "contains", $query)
+history = $historyKind == 1 ? @Filter(ended, "kind", "==", "agent") : $historyKind == 2 ? @Filter(ended, "kind", "==", "terminal") : ended
+blocked = @Filter(sessions, "status", "==", "blocked")
+
+sidebar = Row([$rail ? railView : treeView, Divider()], {align: "stretch"})
+
+titleStart = Button("", @Set($rail, !$rail), "ghost", false, "list_tree")
+
+titleEnd = Row([
+  Row(@Each(myLayouts, "l", Button(l.name, @Set($layout, l.id), "ghost", $layout == l.id, "split")), {gap: 2}),
+  Button("", @ToAssistant("New layout in " + ws.name), "ghost", false, "plus")
+], {gap: 2})
+
+statusStart = Text(ws.name + " · " + current.name, "small")
+statusEnd = Tag(@Count(blocked) + " need you", @Count(blocked) > 0 ? "danger" : "secondary")
+
+railView = Column(@Each(workspaces, "w", Button("", Action([@Set($workspace, w.id), @Set($layout, w.layout), @Set($worktree, @First(@Filter(worktrees, "workspace", "==", w.id)).id)]), "ghost", $workspace == w.id, $workspace == w.id ? "folder_open" : "folder")), {width: 44, gap: 2, padding: 4, surface: "panel"})
+
+treeView = Column([
+  Row([Text("Workbench", "heading"), Spacer(), Button("", @ToAssistant("Open a workspace"), "ghost", false, "plus")], {gap: 6, padding: 6}),
+  Column(@Each(machines, "m", Column([
+    ListItem(m.name, null, false, m.icon, m.detail),
+    Column(@Each(@Filter(workspaces, "machine", "==", m.id), "w", Column([
+      ListItem(w.name, Action([@Set($workspace, w.id), @Set($layout, w.layout), @Set($worktree, @First(@Filter(worktrees, "workspace", "==", w.id)).id)]), $workspace == w.id, $workspace == w.id ? "folder_open" : "folder", null, 1, @Count(@Filter(@Filter(sessions, "workspace", "==", w.id), "status", "==", "blocked")) > 0 ? [Tag("!", "danger")] : []),
+      $workspace == w.id ? Column(@Each(@Filter(worktrees, "workspace", "==", w.id), "t",
+        ListItem(t.branch, @Set($worktree, t.id), $worktree == t.id, "git_branch", t.ahead + (t.changes > 0 ? " · " + t.changes + " changed" : ""), 2, [
+          Tag(@Count(@Filter(@Filter(@Filter(sessions, "worktree", "==", t.id), "kind", "==", "agent"), "status", "!=", "off")) + " ag", @Count(@Filter(@Filter(sessions, "worktree", "==", t.id), "status", "==", "blocked")) > 0 ? "danger" : "secondary"),
+          Tag(@Count(@Filter(@Filter(@Filter(sessions, "worktree", "==", t.id), "kind", "==", "terminal"), "status", "!=", "off")) + " sh", "secondary")
+        ])
+      )) : nothing,
+      $workspace == w.id ? ListItem("New worktree…", @ToAssistant("New worktree in " + w.name), false, "plus", null, 2) : nothing
+    ])))
+  ], {gap: 2})), {gap: 6, grow: true, scroll: true, padding: 4})
+], {width: 280, surface: "panel"})
+
+leftDock = Column([
+  Tabs(["Files", "Git"], $dockTab),
+  Row([Icon("git_branch", "accent"), Text(wt.path, "small")], {gap: 4, padding: 4}),
+  $dockTab == 0
+    ? Column(@Each(@Filter(files, "worktree", "==", $worktree), "f", ListItem(f.name, null, false, f.icon, null, f.depth, f.state == "" ? [] : [Tag(f.state, f.state == "A" ? "success" : "warning")])))
+    : Column([
+        Text(wt.ahead == "" ? "Base branch" : wt.ahead + " commits ahead of main", "small"),
+        Column(@Each(@Filter(@Filter(files, "worktree", "==", $worktree), "state", "!=", ""), "f", ListItem(f.name, null, false, f.icon, null, 0, [Tag(f.state, f.state == "A" ? "success" : "warning")]))),
+        Row([Button("Commit", @ToAssistant("Commit in " + wt.branch), "outline"), Button("Merge into main", @ToAssistant("Merge " + wt.branch), "ghost")], {gap: 4})
+      ], {gap: 6})
+], {width: 240, padding: 4, gap: 4, surface: "panel", scroll: true})
+
+center = Row(@Each(@Filter(panes, "layout", "==", $layout), "p", Column([
+  PaneTabs(p.tabs, 0, [Tag(@First(@Filter(worktrees, "id", "==", p.worktree)).branch, p.worktree == $worktree ? "info" : "secondary")]),
+  p.kind == "terminal" ? Terminal(p.body) : Editor(p.body, 1, 2)
+], {grow: true})), {grow: true, align: "stretch"})
+
+rightDock = Column([
+  Tabs(["Agents · " + @Count(agents), "Terminals · " + @Count(terms), "History · " + @Count(ended)], $sessionsTab),
+  Input($query, "Filter sessions"),
+  Switch("Only " + wt.branch, $onlyWorktree),
+  $sessionsTab == 0 ? agentsView : $sessionsTab == 1 ? termsView : historyView
+], {width: 300, padding: 6, gap: 6, surface: "panel", scroll: true})
+
+agentsView = Column([
+  Text("Needs you", "error"),
+  Column(@Each(@Filter(agents, "status", "==", "blocked"), "a", ListItem(a.name, @ToAssistant("Answer " + a.id), false, "zed_agent", a.program + " · " + a.id, 0, [Tag("blocked", "danger")]))),
+  Text("Working", "warning"),
+  Column(@Each(@Filter(agents, "status", "==", "working"), "a", ListItem(a.name, @ToAssistant("Show " + a.id + " in " + current.name), false, "zed_agent", a.program + " · turn " + a.turn, 0, [Tag("working", "warning")]))),
+  Text("Idle and done", "muted"),
+  Column(@Each(@Filter(@Filter(agents, "status", "!=", "blocked"), "status", "!=", "working"), "a", ListItem(a.name, @ToAssistant("Show " + a.id + " in " + current.name), false, "zed_agent", a.program + " · " + a.when, 0, [Tag(a.status, a.status == "done" ? "success" : "secondary")]))),
+  Button("New agent in " + wt.branch, @ToAssistant("New agent in " + wt.branch), "primary", false, "plus")
+], {gap: 4})
+
+termsView = Column([
+  Column(@Each(terms, "s", ListItem(s.name, @ToAssistant("Show " + s.id + " in " + current.name), false, "terminal", s.program + " · " + s.id, 0, [Tag(s.status, "success")]))),
+  Button("New terminal in " + wt.branch, @ToAssistant("New terminal in " + wt.branch), "outline", false, "plus")
+], {gap: 4})
+
+historyView = Column([
+  Tabs(["All", "Agents", "Terminals"], $historyKind),
+  Text("Sessions that ended. Agents resume where they stopped; a terminal reopens in its directory.", "small"),
+  Column(@Each(history, "h", ListItem(h.name, @ToAssistant((h.kind == "agent" ? "Resume " : "Reopen ") + h.id), false, h.kind == "agent" ? "zed_agent" : "terminal", h.program + (h.turn > 0 ? " · " + h.turn + " turns" : "") + " · " + h.when, 0, [Tag(@First(@Filter(worktrees, "id", "==", h.worktree)).branch, "secondary")]))),
+  @Count(history) == 0 ? Text("No ended session matches.", "muted") : nothing
+], {gap: 4})

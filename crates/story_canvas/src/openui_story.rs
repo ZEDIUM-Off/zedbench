@@ -12,10 +12,11 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     progress::Progress,
     switch::Switch,
-    tab::{Tab, TabBar},
+    tab::{Tab, TabBar as KitTabBar},
     tag::Tag,
 };
 use icons::IconName;
+use workspace::ui::{Tab as ZedTab, TabBar, TabPosition, Toggleable as _};
 use openui::{ActionPlan, ActionStep, Document, Element, Inputs, Library, Severity, Value};
 use theme::ActiveTheme as _;
 
@@ -168,6 +169,11 @@ impl OpenUiStory {
                         }
                         Some("editor") => container = container.bg(colors.editor_background),
                         Some("selected") => container = container.bg(colors.element_selected),
+                        Some("title_bar") => container = container.bg(colors.title_bar_background),
+                        Some("status_bar") => {
+                            container = container.bg(colors.status_bar_background)
+                        }
+                        Some("tab_bar") => container = container.bg(colors.tab_bar_background),
                         _ => {}
                     }
                     match style.get("align").and_then(Value::as_str) {
@@ -350,7 +356,7 @@ impl OpenUiStory {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.)
                     .max(0.) as usize;
-                let mut tabs = TabBar::new(id)
+                let mut tabs = KitTabBar::new(id)
                     .small()
                     .children(labels.into_iter().map(|label| Tab::new().label(label)))
                     .selected_index(selected);
@@ -361,6 +367,132 @@ impl OpenUiStory {
                 }
                 tabs.into_any_element()
             }
+            "PaneTabs" => {
+                let selected = element
+                    .prop("selected")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.)
+                    .max(0.) as usize;
+                let binding = binding(element, "selected");
+                let tabs = element
+                    .prop("tabs")
+                    .and_then(Value::as_array)
+                    .unwrap_or_default()
+                    .to_vec();
+                let count = tabs.len();
+                let end = element
+                    .prop("end")
+                    .map(|end| self.render_value(end, path, window, cx))
+                    .unwrap_or_default();
+                let mut bar = TabBar::new(id);
+                for (index, tab) in tabs.iter().enumerate() {
+                    let field = |name: &str| {
+                        tab.as_object()
+                            .and_then(|tab| tab.get(name))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    };
+                    let dirty = tab
+                        .as_object()
+                        .and_then(|tab| tab.get("dirty"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    let position = if index == 0 {
+                        TabPosition::First
+                    } else if index + 1 == count {
+                        TabPosition::Last
+                    } else {
+                        TabPosition::Middle(index.cmp(&selected))
+                    };
+                    let mut zed_tab = ZedTab::new(SharedString::from(format!("{path}.tab.{index}")))
+                        .position(position)
+                        .toggle_state(index == selected)
+                        .start_slot::<AnyElement>(field("icon").map(|name| icon(&name, colors.text_muted)))
+                        .end_slot::<AnyElement>(dirty.then(|| {
+                            div()
+                                .size_1p5()
+                                .rounded_full()
+                                .bg(colors.text_accent)
+                                .into_any_element()
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .child(field("label").unwrap_or_default())
+                                .when_some(field("detail"), |label, detail| {
+                                    label.child(
+                                        div().text_color(colors.text_muted).child(detail),
+                                    )
+                                }),
+                        );
+                    if let Some(binding) = binding.clone() {
+                        zed_tab = zed_tab.on_click(cx.listener(move |story, _: &ClickEvent, _, cx| {
+                            story.set_state(&binding, Value::from(index as f64), cx)
+                        }));
+                    }
+                    bar = bar.child(zed_tab);
+                }
+                bar.end_children(end).into_any_element()
+            }
+            "Editor" => {
+                let first_line = element
+                    .prop("firstLine")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.)
+                    .max(1.) as usize;
+                let active_line = element.prop("activeLine").and_then(Value::as_f64);
+                div()
+                    .id(id)
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .py_1()
+                    .bg(colors.editor_background)
+                    .font_family(buffer_font(cx))
+                    .text_sm()
+                    .children(text("text").lines().enumerate().map(|(index, line)| {
+                        let number = first_line + index;
+                        let active = active_line.map(|line| line as usize) == Some(number);
+                        div()
+                            .flex()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .when(active, |row| row.bg(colors.editor_active_line_background))
+                            .child(
+                                div()
+                                    .w(px(44.))
+                                    .flex_none()
+                                    .pr_3()
+                                    .text_right()
+                                    .text_color(if active {
+                                        colors.editor_active_line_number
+                                    } else {
+                                        colors.editor_line_number
+                                    })
+                                    .child(number.to_string()),
+                            )
+                            .child(line.to_owned())
+                    }))
+                    .into_any_element()
+            }
+            "Terminal" => div()
+                .id(id)
+                .size_full()
+                .overflow_hidden()
+                .p_2()
+                .bg(colors.terminal_background)
+                .text_color(colors.terminal_foreground)
+                .font_family(buffer_font(cx))
+                .text_sm()
+                .whitespace_nowrap()
+                .children(
+                    text("text")
+                        .lines()
+                        .map(|line| div().child(line.to_owned())),
+                )
+                .into_any_element(),
             "Progress" => Progress::new(id)
                 .value(element.prop("value").and_then(Value::as_f64).unwrap_or(0.) as f32)
                 .into_any_element(),

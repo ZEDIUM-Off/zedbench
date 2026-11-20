@@ -27,4 +27,5 @@ project.workspace = true
 serde_json.workspace = true
 settings.workspace = true
 theme.workspace = true
+util.workspace = true
 workspace.workspace = true

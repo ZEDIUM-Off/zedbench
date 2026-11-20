@@ -30,7 +30,16 @@ pub fn library() -> Result<Library, LibraryError> {
         Param::optional("rounded", Type::Boolean),
         Param::optional(
             "surface",
-            Type::one_of(["none", "panel", "elevated", "editor", "selected"]),
+            Type::one_of([
+                "none",
+                "panel",
+                "elevated",
+                "editor",
+                "selected",
+                "title_bar",
+                "status_bar",
+                "tab_bar",
+            ]),
         ),
         Param::optional("align", Type::one_of(["start", "center", "end", "stretch"])),
         Param::optional(
@@ -126,6 +135,36 @@ pub fn library() -> Result<Library, LibraryError> {
             "Takes the remaining space in a row or column",
         ))
         .component(
+            ComponentDef::new(
+                "PaneTabs",
+                "Zed's tab bar of a pane; selected is the index of the active tab",
+            )
+            .param(Param::required(
+                "tabs",
+                Type::list(Type::object([
+                    Param::required("label", Type::String),
+                    Param::optional("icon", Type::String),
+                    Param::optional("dirty", Type::Boolean),
+                    Param::optional("detail", Type::String),
+                ])),
+            ))
+            .param(Param::required("selected", Type::Number).bindable())
+            .param(Param::optional("end", Type::list(Type::component()))),
+        )
+        .component(
+            ComponentDef::new(
+                "Editor",
+                "A read-only view of Zed's editor: gutter with line numbers, then the text",
+            )
+            .param(Param::required("text", Type::String))
+            .param(Param::optional("firstLine", Type::Number))
+            .param(Param::optional("activeLine", Type::Number)),
+        )
+        .component(
+            ComponentDef::new("Terminal", "A read-only view of Zed's terminal")
+                .param(Param::required("text", Type::String)),
+        )
+        .component(
             ComponentDef::new("KitStory", "A GPUI Kit gallery story, by title")
                 .param(Param::required("name", Type::String)),
         )
@@ -135,6 +174,46 @@ pub fn library() -> Result<Library, LibraryError> {
         )
         .root("Column")
         .build()
+}
+
+/// A story may extend a story that extends another, up to this depth.
+pub const MAX_EXTENDS: usize = 4;
+
+/// The story a story extends, from a first line `# extends: <path>`. The
+/// path is relative to the story's directory.
+pub fn extended_story(source: &str) -> Option<&str> {
+    source
+        .lines()
+        .take_while(|line| line.trim_start().starts_with('#'))
+        .find_map(|line| line.trim_start().strip_prefix('#')?.trim().strip_prefix("extends:"))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
+/// Resolves `target` against the directory of `story`, both relative and
+/// `/`-separated. `None` when the result would leave the root.
+pub fn resolve_story_path(story: &str, target: &str) -> Option<String> {
+    let mut parts: Vec<&str> = story.split('/').collect();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// A story that extends another is the base followed by the story: for a
+/// name both define, the story's definition wins at the base's place, so a
+/// story overrides one slot and keeps the rest of the layout.
+pub fn compose_story<'a>(chain: impl IntoIterator<Item = &'a str>) -> String {
+    let mut sources: Vec<&str> = chain.into_iter().collect();
+    sources.reverse();
+    sources.join("\n")
 }
 
 #[cfg(test)]
@@ -170,7 +249,25 @@ mod tests {
         )?;
         assert!(!found.is_empty());
         for path in found {
-            let document = openui::parse(&library, &std::fs::read_to_string(&path)?);
+            let mut chain = Vec::new();
+            let mut current = path.clone();
+            loop {
+                let source = std::fs::read_to_string(&current)?;
+                let base = super::extended_story(&source)
+                    .map(|base| current.parent().unwrap_or(Path::new("")).join(base));
+                chain.push(source);
+                let Some(base) = base else {
+                    break;
+                };
+                assert!(
+                    chain.len() <= super::MAX_EXTENDS,
+                    "{}: extends too deep",
+                    path.display()
+                );
+                current = base;
+            }
+            let source = super::compose_story(chain.iter().map(String::as_str));
+            let document = openui::parse(&library, &source);
             let evaluation = document.evaluate(&Inputs::new());
             let diagnostics = document
                 .diagnostics()

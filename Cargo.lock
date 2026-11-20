@@ -19740,6 +19740,7 @@ dependencies = [
  "serde_json",
  "settings",
  "theme",
+ "util",
  "workspace",
 ]
 

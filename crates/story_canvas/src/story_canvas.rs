@@ -6,8 +6,11 @@ use gpui::{
 use gpui_kit::base::Root;
 use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBuffer;
-use project::Project;
+use project::{Project, ProjectPath};
+use std::collections::HashMap;
 use std::path::Path;
+use util::ResultExt as _;
+use util::rel_path::RelPath;
 use workspace::item::{ItemHandle, SaveOptions};
 use workspace::ui::{Icon, IconName};
 use workspace::{Item, OpenInPreview, Pane, Workspace};
@@ -87,14 +90,17 @@ fn open_added_story(
 }
 
 fn in_place_preview(
-    _: &mut Workspace,
+    workspace: &mut Workspace,
     item: &dyn ItemHandle,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Option<Box<dyn ItemHandle>> {
     let source = story_source(&item.act_as::<MultiBuffer>(cx)?, cx)?;
     init_libraries(cx);
-    Some(Box::new(cx.new(|cx| StoryCanvas::new(source, window, cx))))
+    let project = workspace.project().clone();
+    Some(Box::new(
+        cx.new(|cx| StoryCanvas::new(source, project, window, cx)),
+    ))
 }
 
 /// The buffer of `buffer` when it is a single `.gpui-story` file.
@@ -132,6 +138,7 @@ pub fn open(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    let project = workspace.project().clone();
     let pane = if side {
         workspace.adjacent_pane_of(&origin, window, cx)
     } else {
@@ -149,7 +156,7 @@ pub fn open(
         // The libraries' globals are only needed once a story is shown, so
         // Zedbench pays for them on first use rather than at startup.
         init_libraries(cx);
-        let view = cx.new(|cx| StoryCanvas::new(source, window, cx));
+        let view = cx.new(|cx| StoryCanvas::new(source, project, window, cx));
         pane.add_item(Box::new(view), !side, !side, None, window, cx);
     });
 }
@@ -172,41 +179,171 @@ impl gpui::Global for LibrariesInitialized {}
 struct StoryCanvas {
     id: EntityId,
     source: Entity<Buffer>,
+    project: Entity<Project>,
     library: Result<Library, SharedString>,
     story: Option<(Entity<OpenUiStory>, Entity<Root>)>,
+    /// The stories this one extends, opened once and followed on edit.
+    bases: HashMap<ProjectPath, Result<Entity<Buffer>, SharedString>>,
+    opening: HashMap<ProjectPath, Task<()>>,
+    /// Why the story could not be composed with its bases.
+    problem: Option<SharedString>,
     focus: FocusHandle,
-    _edits: Subscription,
+    _edits: Vec<Subscription>,
+}
+
+/// The story followed by the stories it extends, or why the chain stops.
+struct Chain {
+    sources: Vec<String>,
+    missing: Option<ProjectPath>,
+    problem: Option<SharedString>,
 }
 
 impl StoryCanvas {
-    fn new(source: Entity<Buffer>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let edits = cx.subscribe_in(&source, window, |canvas, buffer, event, window, cx| {
-            if matches!(event, BufferEvent::Edited { .. }) {
-                canvas.load(&buffer.clone(), window, cx);
-            }
-        });
+    fn new(
+        source: Entity<Buffer>,
+        project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let edits = Self::follow(&source, window, cx);
         let mut canvas = Self {
             id: cx.entity_id(),
-            source: source.clone(),
+            source,
+            project,
             library: openui_library::library()
                 .map_err(|error| format!("Invalid story library: {error}").into()),
             story: None,
+            bases: HashMap::default(),
+            opening: HashMap::default(),
+            problem: None,
             focus: cx.focus_handle(),
-            _edits: edits,
+            _edits: vec![edits],
         };
-        canvas.load(&source, window, cx);
+        canvas.load(window, cx);
         canvas
     }
 
-    fn load(&mut self, source: &Entity<Buffer>, window: &mut Window, cx: &mut Context<Self>) {
+    fn follow(buffer: &Entity<Buffer>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(buffer, window, |canvas, _, event, window, cx| {
+            if matches!(event, BufferEvent::Edited { .. }) {
+                canvas.load(window, cx);
+            }
+        })
+    }
+
+    fn chain(&self, cx: &App) -> Chain {
+        let buffer = self.source.read(cx);
+        let mut chain = Chain {
+            sources: vec![buffer.text()],
+            missing: None,
+            problem: None,
+        };
+        let mut location = buffer
+            .file()
+            .map(|file| (file.worktree_id(cx), file.path().clone()));
+        while let Some(target) = chain
+            .sources
+            .last()
+            .and_then(|source| openui_library::extended_story(source))
+        {
+            if chain.sources.len() > openui_library::MAX_EXTENDS {
+                chain.problem = Some(
+                    format!(
+                        "A story extends at most {} others",
+                        openui_library::MAX_EXTENDS
+                    )
+                    .into(),
+                );
+                break;
+            }
+            let Some((worktree_id, path)) = &location else {
+                chain.problem = Some("Save the story before it extends another".into());
+                break;
+            };
+            let Some(path) = openui_library::resolve_story_path(path.as_unix_str(), target)
+                .and_then(|path| RelPath::from_unix_str(&path).ok().map(RelPath::into_arc))
+            else {
+                chain.problem = Some(format!("{target} is outside the project").into());
+                break;
+            };
+            let project_path = ProjectPath {
+                worktree_id: *worktree_id,
+                path,
+            };
+            match self.bases.get(&project_path) {
+                Some(Ok(base)) => {
+                    chain.sources.push(base.read(cx).text());
+                    location = Some((project_path.worktree_id, project_path.path));
+                }
+                Some(Err(error)) => {
+                    chain.problem = Some(error.clone());
+                    break;
+                }
+                None => {
+                    chain.missing = Some(project_path);
+                    break;
+                }
+            }
+        }
+        chain
+    }
+
+    fn open_base(&mut self, path: ProjectPath, window: &mut Window, cx: &mut Context<Self>) {
+        if self.opening.contains_key(&path) {
+            return;
+        }
+        let task = self
+            .project
+            .update(cx, |project, cx| project.open_buffer(path.clone(), cx));
+        let task = cx.spawn_in(window, {
+            let path = path.clone();
+            async move |this, cx| {
+                let result = task.await;
+                this.update_in(cx, |canvas, window, cx| {
+                    canvas.opening.remove(&path);
+                    let base = match result {
+                        Ok(buffer) => {
+                            canvas._edits.push(Self::follow(&buffer, window, cx));
+                            Ok(buffer)
+                        }
+                        Err(error) => Err(format!(
+                            "Cannot open {}: {error}",
+                            path.path.as_unix_str()
+                        )
+                        .into()),
+                    };
+                    canvas.bases.insert(path, base);
+                    canvas.load(window, cx);
+                })
+                .log_err();
+            }
+        });
+        self.opening.insert(path, task);
+    }
+
+    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library.is_err() {
+            return;
+        }
+        let chain = self.chain(cx);
+        self.problem = chain.problem;
+        if let Some(missing) = chain.missing {
+            self.problem = Some(format!("Loading {}…", missing.path.as_unix_str()).into());
+            self.open_base(missing, window, cx);
+            if self.story.is_some() {
+                cx.notify();
+                return;
+            }
+        }
+        let text = openui_library::compose_story(chain.sources.iter().map(String::as_str));
+        let text = if text.len() > MAX_STORY_BYTES {
+            "root = Column([Text(\"Story exceeds 64 KiB with the stories it extends\", \"error\")])"
+                .to_owned()
+        } else {
+            text
+        };
         let Ok(library) = &self.library else {
             return;
-        };
-        let buffer = source.read(cx);
-        let text = if buffer.len() > MAX_STORY_BYTES {
-            "root = Column([Text(\"Story file exceeds 64 KiB\", \"error\")])".to_owned()
-        } else {
-            buffer.text()
         };
         match &self.story {
             Some((story, _)) => {
@@ -230,7 +367,13 @@ impl Render for StoryCanvas {
             .track_focus(&self.focus)
             .size_full();
         match (&self.library, &self.story) {
-            (Ok(_), Some((_, root))) => canvas.child(root.clone()),
+            (Ok(_), Some((_, root))) => canvas
+                .flex()
+                .flex_col()
+                .when_some(self.problem.clone(), |canvas, problem| {
+                    canvas.child(div().flex_none().px_2().py_1().text_sm().child(problem))
+                })
+                .child(div().flex_1().min_h_0().child(root.clone())),
             (Err(error), _) => canvas
                 .flex()
                 .items_center()

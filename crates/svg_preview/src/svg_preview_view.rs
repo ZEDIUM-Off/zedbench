@@ -4,20 +4,23 @@ use std::sync::Arc;
 
 use file_icons::FileIcons;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
+    App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
     RenderImage, Styled, Subscription, Task, WeakEntity, Window, div, img,
 };
 use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBuffer;
 use project::ProjectPath;
 use ui::prelude::*;
-use workspace::item::Item;
+use anyhow::Result;
+use project::Project;
+use workspace::item::{Item, ItemHandle, SaveOptions};
 use workspace::notifications::NotifyResultExt;
 use workspace::{OpenInPreview, Pane, Workspace};
 
 use crate::{OpenFollowingPreview, OpenPreview, OpenPreviewToTheSide};
 
 pub struct SvgPreviewView {
+    id: EntityId,
     focus_handle: FocusHandle,
     buffer: Option<Entity<Buffer>>,
     current_svg: Option<Result<Arc<RenderImage>, SharedString>>,
@@ -58,6 +61,7 @@ impl SvgPreviewView {
                 .map(|buffer| Self::create_buffer_subscription(buffer, window, cx));
 
             let mut this = Self {
+                id: cx.entity_id(),
                 focus_handle: cx.focus_handle(),
                 buffer,
                 current_svg: None,
@@ -279,6 +283,25 @@ impl SvgPreviewView {
         cx.notify();
     }
 
+    /// The preview that the tab of an SVG file switches to.
+    pub fn in_place_preview(
+        workspace: &mut Workspace,
+        item: &dyn ItemHandle,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        let buffer = item
+            .act_as::<MultiBuffer>(cx)
+            .filter(|buffer| Self::is_svg_file(buffer, cx))?;
+        Some(Box::new(Self::create_svg_view(
+            SvgPreviewMode::Default,
+            workspace,
+            buffer,
+            window,
+            cx,
+        )))
+    }
+
     pub fn register(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
         let workspace_entity = cx.entity();
         cx.subscribe_in(
@@ -309,12 +332,7 @@ impl SvgPreviewView {
                         Self::open_preview_to_the_side_of_pane(workspace, buffer, pane, window, cx);
                     }
                     OpenInPreview::Replace => {
-                        Self::open_preview_in_pane(workspace, buffer, pane.clone(), window, cx);
-                        if !item.is_dirty(cx) {
-                            pane.update(cx, |pane, cx| {
-                                pane.remove_item(item.item_id(), false, false, window, cx);
-                            });
-                        }
+                        workspace.toggle_preview_in_place(item.as_ref(), window, cx);
                     }
                 }
             },
@@ -411,6 +429,35 @@ impl Item for SvgPreviewView {
 
     fn telemetry_event_text(&self) -> Option<&'static str> {
         Some("svg preview: open")
+    }
+
+    // Shown in its file's tab, the preview is the only item left for the file,
+    // so closing it must not drop unsaved edits silently.
+    fn is_dirty(&self, cx: &App) -> bool {
+        workspace::is_in_place_preview(self.id, cx)
+            && self
+                .buffer
+                .as_ref()
+                .is_some_and(|buffer| buffer.read(cx).is_dirty())
+    }
+
+    fn can_save(&self, cx: &App) -> bool {
+        self.buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.read(cx).file().is_some())
+    }
+
+    fn save(
+        &mut self,
+        _: SaveOptions,
+        project: Entity<Project>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(buffer) = self.buffer.clone() else {
+            return Task::ready(Ok(()));
+        };
+        project.update(cx, |project, cx| project.save_buffer(buffer, cx))
     }
 
     fn to_item_events(_event: &Self::Event, _f: &mut dyn FnMut(workspace::item::ItemEvent)) {}

@@ -1,11 +1,15 @@
+use anyhow::Result;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString,
-    Subscription, Window, actions, div, prelude::*,
+    App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString,
+    Subscription, Task, Window, actions, div, prelude::*,
 };
 use gpui_kit::base::Root;
 use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBuffer;
+use project::Project;
 use std::path::Path;
+use workspace::item::{ItemHandle, SaveOptions};
+use workspace::ui::{Icon, IconName};
 use workspace::{Item, OpenInPreview, Pane, Workspace};
 
 mod openui_library;
@@ -29,6 +33,7 @@ pub const STORY_EXTENSION: &str = "gpui-story";
 const MAX_STORY_BYTES: usize = 64 * 1024;
 
 pub fn init(cx: &mut App) {
+    workspace::register_in_place_preview(in_place_preview, cx);
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         workspace.register_action(|workspace, _: &OpenCanvas, window, cx| {
             open_active(workspace, false, window, cx)
@@ -76,14 +81,20 @@ fn open_added_story(
         OpenInPreview::Editor => {}
         OpenInPreview::Side => open(workspace, source, pane, true, window, cx),
         OpenInPreview::Replace => {
-            open(workspace, source, pane.clone(), false, window, cx);
-            if !item.is_dirty(cx) {
-                pane.update(cx, |pane, cx| {
-                    pane.remove_item(item.item_id(), false, false, window, cx);
-                });
-            }
+            workspace.toggle_preview_in_place(item.as_ref(), window, cx);
         }
     }
+}
+
+fn in_place_preview(
+    _: &mut Workspace,
+    item: &dyn ItemHandle,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Option<Box<dyn ItemHandle>> {
+    let source = story_source(&item.act_as::<MultiBuffer>(cx)?, cx)?;
+    init_libraries(cx);
+    Some(Box::new(cx.new(|cx| StoryCanvas::new(source, window, cx))))
 }
 
 /// The buffer of `buffer` when it is a single `.gpui-story` file.
@@ -159,6 +170,7 @@ struct LibrariesInitialized;
 impl gpui::Global for LibrariesInitialized {}
 
 struct StoryCanvas {
+    id: EntityId,
     source: Entity<Buffer>,
     library: Result<Library, SharedString>,
     story: Option<(Entity<OpenUiStory>, Entity<Root>)>,
@@ -174,6 +186,7 @@ impl StoryCanvas {
             }
         });
         let mut canvas = Self {
+            id: cx.entity_id(),
             source: source.clone(),
             library: openui_library::library()
                 .map_err(|error| format!("Invalid story library: {error}").into()),
@@ -213,6 +226,7 @@ impl Render for StoryCanvas {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let canvas = div()
             .id("gpui-story-canvas")
+            .key_context("StoryCanvas")
             .track_focus(&self.focus)
             .size_full();
         match (&self.library, &self.story) {
@@ -243,7 +257,31 @@ impl Item for StoryCanvas {
         self.source
             .read(cx)
             .file()
-            .map(|file| format!("Story: {}", file.file_name(cx)).into())
+            .map(|file| format!("Preview {}", file.file_name(cx)).into())
             .unwrap_or_else(|| "GPUI Story".into())
+    }
+
+    fn tab_icon(&self, _: &Window, _: &App) -> Option<Icon> {
+        Some(Icon::new(IconName::Eye))
+    }
+
+    // Shown in its file's tab, the canvas is the only item left for the file,
+    // so closing it must not drop unsaved edits silently.
+    fn is_dirty(&self, cx: &App) -> bool {
+        workspace::is_in_place_preview(self.id, cx) && self.source.read(cx).is_dirty()
+    }
+
+    fn can_save(&self, cx: &App) -> bool {
+        self.source.read(cx).file().is_some()
+    }
+
+    fn save(
+        &mut self,
+        _: SaveOptions,
+        project: Entity<Project>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        project.update(cx, |project, cx| project.save_buffer(self.source.clone(), cx))
     }
 }

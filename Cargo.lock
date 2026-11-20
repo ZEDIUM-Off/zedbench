@@ -19736,6 +19736,7 @@ dependencies = [
  "log",
  "multi_buffer",
  "openui",
+ "project",
  "serde_json",
  "settings",
  "theme",
@@ -20017,6 +20018,7 @@ checksum = "0193cc4331cfd2f3d2011ef287590868599a2f33c3e69bc22c1a3d3acf9e02fb"
 name = "svg_preview"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "file_icons",
  "gpui",
  "language",

@@ -174,41 +174,14 @@ impl MarkdownPreviewView {
                     return;
                 };
                 match mode {
-                    OpenInPreview::Editor => return,
+                    OpenInPreview::Editor => {}
                     OpenInPreview::Side => {
                         Self::open_preview_to_the_side_of_pane(workspace, editor, pane, window, cx);
-                        return;
                     }
-                    OpenInPreview::Replace => {}
-                }
-                let replaces_editor = !item.is_dirty(cx);
-                let replaces_temporary_editor =
-                    replaces_editor && pane.read(cx).is_active_preview_item(item.item_id());
-                let activate = workspace.active_pane() == &pane
-                    && pane
-                        .read(cx)
-                        .active_item()
-                        .is_some_and(|active_item| active_item.item_id() == item.item_id());
-                let focus = editor.focus_handle(cx).contains_focused(window, cx);
-                let preview = Self::activate_or_add_preview(
-                    workspace,
-                    editor,
-                    pane.clone(),
-                    activate,
-                    focus,
-                    window,
-                    cx,
-                );
-                if !replaces_editor {
-                    return;
-                }
-                pane.update(cx, |pane, cx| {
-                    if replaces_temporary_editor {
-                        pane.replace_preview_item_id(preview.entity_id(), window, cx);
-                    } else {
-                        pane.remove_item(item.item_id(), false, false, window, cx);
+                    OpenInPreview::Replace => {
+                        workspace.toggle_preview_in_place(item.as_ref(), window, cx);
                     }
-                });
+                }
             },
         )
         .detach();
@@ -254,6 +227,22 @@ impl MarkdownPreviewView {
                 cx.notify();
             }
         });
+    }
+
+    /// The preview that the tab of a Markdown file switches to.
+    pub fn in_place_preview(
+        workspace: &mut Workspace,
+        item: &dyn ItemHandle,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        // A preview acts as its editor too, so only an editor itself qualifies.
+        let editor = item
+            .downcast::<Editor>()
+            .filter(|editor| Self::is_markdown_file(editor, cx))?;
+        Some(Box::new(Self::create_markdown_view(
+            workspace, editor, window, cx,
+        )))
     }
 
     pub fn open_preview_in_pane(
@@ -1048,9 +1037,14 @@ impl MarkdownPreviewView {
             return;
         };
         let preview_id = cx.entity_id();
+        let preview = cx.entity();
 
         window.defer(cx, move |window, cx| {
             workspace.update(cx, |workspace, cx| {
+                if workspace::is_in_place_preview(preview_id, cx) {
+                    workspace.toggle_preview_in_place(&preview, window, cx);
+                    return;
+                }
                 let Some(pane) = workspace.pane_for_item_id(preview_id) else {
                     return;
                 };
@@ -1795,6 +1789,16 @@ impl Item for MarkdownPreviewView {
         {
             self.set_editor(editor, window, cx);
         }
+    }
+
+    // Shown in its file's tab, the preview is the only item left for the file,
+    // so closing it must not drop unsaved edits silently.
+    fn is_dirty(&self, cx: &App) -> bool {
+        workspace::is_in_place_preview(self.self_handle.entity_id(), cx)
+            && self
+                .active_editor
+                .as_ref()
+                .is_some_and(|editor_state| editor_state.editor.read(cx).is_dirty(cx))
     }
 
     fn can_save(&self, cx: &App) -> bool {
@@ -4478,6 +4482,27 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
+        // The preview takes the editor's place in its tab and keeps the editor,
+        // so the unsaved edits are neither lost nor closed silently.
+        let preview = cx.update(|cx| {
+            let workspace = workspace.read(cx);
+            assert_eq!(workspace.items_of_type::<Editor>(cx).count(), 0);
+            let previews = workspace
+                .items_of_type::<MarkdownPreviewView>(cx)
+                .collect::<Vec<_>>();
+            assert_eq!(previews.len(), 1);
+            let preview = previews[0].clone();
+            assert!(preview.read(cx).is_dirty(cx));
+            preview
+        });
+        multi_workspace
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    assert!(workspace.toggle_preview_in_place(&preview, window, cx));
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
         cx.update(|cx| {
             let workspace = workspace.read(cx);
             assert!(
@@ -4486,10 +4511,10 @@ mod tests {
                     .iter()
                     .any(|pane| pane.read(cx).index_for_item(&editor).is_some())
             );
-            assert_eq!(workspace.items_of_type::<Editor>(cx).count(), 1);
+            assert!(editor.read(cx).is_dirty(cx));
             assert_eq!(
                 workspace.items_of_type::<MarkdownPreviewView>(cx).count(),
-                1
+                0
             );
         });
     }
@@ -4849,6 +4874,9 @@ mod tests {
             let state = AppState::test(cx);
             editor::init(cx);
             crate::init(cx);
+            // User patterns merge with the default ones, so `*.md` is pinned
+            // here and follows `open_markdown_files_in_preview` below.
+            set_auto_preview_enabled(cx, false);
             state
         })
     }
@@ -4928,6 +4956,13 @@ mod tests {
                     .markdown_preview
                     .get_or_insert_default()
                     .open_markdown_files_in_preview = Some(enabled);
+                let mode = if enabled {
+                    workspace::OpenInPreview::Replace
+                } else {
+                    workspace::OpenInPreview::Editor
+                };
+                settings.workspace.open_in_preview =
+                    Some([("*.md".to_owned(), mode)].into_iter().collect());
             });
         });
     }

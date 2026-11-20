@@ -38,6 +38,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<MarkdownPreviewView>(cx);
+    workspace::register_in_place_preview(MarkdownPreviewView::in_place_preview, cx);
 
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {

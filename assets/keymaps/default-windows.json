@@ -603,7 +603,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-k v": "markdown::OpenPreviewToTheSide",
-      "ctrl-shift-v": "markdown::OpenPreview",
+      "ctrl-shift-v": "workspace::TogglePreview",
     },
   },
   {
@@ -611,7 +611,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-k v": "storybook::OpenCanvasToTheSide",
-      "ctrl-shift-v": "storybook::OpenCanvas",
+      "ctrl-shift-v": "workspace::TogglePreview",
     },
   },
   {
@@ -619,7 +619,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-k v": "svg::OpenPreviewToTheSide",
-      "ctrl-shift-v": "svg::OpenPreview",
+      "ctrl-shift-v": "workspace::TogglePreview",
     },
   },
   {
@@ -1446,6 +1446,12 @@
     "bindings": {
       "ctrl-tab": "pane::ActivateNextItem",
       "ctrl-shift-tab": "pane::ActivatePreviousItem",
+    },
+  },
+  {
+    "context": "StoryCanvas || SvgPreview",
+    "bindings": {
+      "ctrl-shift-v": "workspace::TogglePreview",
     },
   },
   {

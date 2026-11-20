@@ -1083,8 +1083,11 @@ impl Pane {
         let mut existing_item = None;
         if let Some(project_entry_id) = project_entry_id {
             for (index, item) in self.items.iter().enumerate() {
-                if item.buffer_kind(cx) == ItemBufferKind::Singleton
-                    && item.project_entry_ids(cx).as_slice() == [project_entry_id]
+                // A preview shown in place of its file stands for that file.
+                let source = crate::in_place_preview::in_place_source(item.item_id(), cx);
+                let file_item = source.as_deref().unwrap_or(&**item);
+                if file_item.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && file_item.project_entry_ids(cx).as_slice() == [project_entry_id]
                 {
                     let item = item.boxed_clone();
                     existing_item = Some((index, item));
@@ -1444,7 +1447,7 @@ impl Pane {
         self.index_for_item_id(item.item_id())
     }
 
-    fn index_for_item_id(&self, item_id: EntityId) -> Option<usize> {
+    pub(crate) fn index_for_item_id(&self, item_id: EntityId) -> Option<usize> {
         self.items.iter().position(|i| i.item_id() == item_id)
     }
 
@@ -2735,7 +2738,7 @@ impl Pane {
         }
     }
 
-    fn pin_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pin_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.change_tab_pin_state(ix, PinOperation::Pin, window, cx);
     }
 
@@ -2801,7 +2804,7 @@ impl Pane {
         });
     }
 
-    fn is_tab_pinned(&self, ix: usize) -> bool {
+    pub(crate) fn is_tab_pinned(&self, ix: usize) -> bool {
         self.pinned_tab_count > ix
     }
 

@@ -1,6 +1,7 @@
 pub mod active_file_name;
 pub mod dock;
 pub mod history_manager;
+mod in_place_preview;
 pub mod invalid_item_view;
 pub mod item;
 mod modal_layer;
@@ -163,6 +164,10 @@ pub use workspace_settings::{
     TabBarSettings, WorkspaceSettings, closing_last_window_quits_app, observe_accessible_mode,
 };
 use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
+
+pub use in_place_preview::{
+    InPlacePreviewProvider, has_in_place_preview, is_in_place_preview, register_in_place_preview,
+};
 
 use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
 use crate::{
@@ -477,6 +482,8 @@ actions!(
         ToggleRightDock,
         /// Toggles zoom on the active pane.
         ToggleZoom,
+        /// Switches the active tab between the file and its preview.
+        TogglePreview,
         /// Toggles maximizing the active editor pane within the center area,
         /// hiding other split panes but leaving docks/panels unaffected.
         ToggleEditorZoom,
@@ -1558,6 +1565,11 @@ impl DelayedDebouncedEditAction {
 /// How the `open_in_preview` setting opens `item`, when `item` is a project
 /// file that one of its patterns matches.
 pub fn open_in_preview_mode(item: &dyn ItemHandle, cx: &App) -> Option<OpenInPreview> {
+    // The tab already switches between the file and its preview: the source
+    // is coming back into it.
+    if has_in_place_preview(item.item_id(), cx) {
+        return Some(OpenInPreview::Editor);
+    }
     let path = item.project_path(cx)?.path;
     WorkspaceSettings::get_global(cx)
         .open_in_preview
@@ -6466,6 +6478,7 @@ impl Workspace {
                 serialize_workspace = false;
             }
             pane::Event::RemovedItem { item } => {
+                self.forget_closed_in_place_previews(item.item_id(), cx);
                 if item
                     .project_path(cx)
                     .is_some_and(|path| self.is_deleted_history_path(&path, cx))
@@ -8434,6 +8447,11 @@ impl Workspace {
             .on_action(cx.listener(Self::reopen_last_picker))
             .on_action(cx.listener(Self::toggle_edit_predictions_all_files))
             .on_action(cx.listener(Self::toggle_theme_mode))
+            .on_action(cx.listener(|workspace, _: &TogglePreview, window, cx| {
+                if let Some(item) = workspace.active_item(cx) {
+                    workspace.toggle_preview_in_place(item.as_ref(), window, cx);
+                }
+            }))
             .on_action(cx.listener(|workspace, _: &Unfollow, window, cx| {
                 let pane = workspace.active_pane().clone();
                 workspace.unfollow_in_pane(&pane, window, cx);

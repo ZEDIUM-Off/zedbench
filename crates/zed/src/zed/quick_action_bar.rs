@@ -92,13 +92,17 @@ impl QuickActionBar {
         if new_show != self.show {
             self.show = new_show;
             cx.emit(ToolbarItemEvent::ChangeLocation(
-                self.get_toolbar_item_location(),
+                self.get_toolbar_item_location(cx),
             ));
         }
     }
 
-    fn get_toolbar_item_location(&self) -> ToolbarItemLocation {
-        if self.show && self.active_editor().is_some() {
+    fn get_toolbar_item_location(&self, cx: &App) -> ToolbarItemLocation {
+        let shows_preview_in_place = self
+            .active_item
+            .as_ref()
+            .is_some_and(|item| workspace::is_in_place_preview(item.item_id(), cx));
+        if self.show && (self.active_editor().is_some() || shows_preview_in_place) {
             ToolbarItemLocation::PrimaryRight
         } else {
             ToolbarItemLocation::Hidden
@@ -109,7 +113,10 @@ impl QuickActionBar {
 impl Render for QuickActionBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(editor) = self.active_editor() else {
-            return div().id("empty quick action bar");
+            // A preview shown in its file's tab keeps the button back to the source.
+            return div()
+                .id("empty quick action bar")
+                .children(self.render_preview_button(cx));
         };
 
         let supports_inlay_hints = editor.update(cx, |editor, cx| editor.supports_inlay_hints(cx));
@@ -818,6 +825,6 @@ impl ToolbarItemView for QuickActionBar {
                     }));
             }
         }
-        self.get_toolbar_item_location()
+        self.get_toolbar_item_location(cx)
     }
 }

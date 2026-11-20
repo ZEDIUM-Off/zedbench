@@ -4,6 +4,7 @@ use markdown_preview::markdown_preview_view::MarkdownPreviewView;
 use svg_preview::svg_preview_view::SvgPreviewView;
 use tabular_data_preview::TabularDataPreviewPane;
 use ui::{Tooltip, prelude::*, text_for_keystroke};
+use workspace::item::ItemHandle;
 
 use super::QuickActionBar;
 
@@ -20,6 +21,9 @@ impl QuickActionBar {
         // workspace's focused item, so each pane's button reflects and
         // targets the content of the pane it belongs to.
         let active_item = self.active_item.as_ref()?;
+        if workspace::is_in_place_preview(active_item.item_id(), cx) {
+            return Some(self.render_show_source_button(active_item.boxed_clone()));
+        }
         let editor = active_item.act_as::<Editor>(cx);
 
         let preview_target = if let Some(buffer) = active_item.act_as::<MultiBuffer>(cx)
@@ -46,17 +50,17 @@ impl QuickActionBar {
             PreviewTarget::Story(_) => (
                 "preview-gpui-story",
                 "Preview GPUI Story",
-                &story_canvas::OpenCanvas as &dyn gpui::Action,
+                &workspace::TogglePreview as &dyn gpui::Action,
             ),
             PreviewTarget::Markdown(_) => (
                 "toggle-markdown-preview",
                 "Preview Markdown",
-                &markdown_preview::OpenPreview as &dyn gpui::Action,
+                &workspace::TogglePreview as &dyn gpui::Action,
             ),
             PreviewTarget::Svg(_) => (
                 "toggle-svg-preview",
                 "Preview SVG",
-                &svg_preview::OpenPreview as &dyn gpui::Action,
+                &workspace::TogglePreview as &dyn gpui::Action,
             ),
             PreviewTarget::TabularData(_) => (
                 "toggle-tabular-preview",
@@ -97,6 +101,12 @@ impl QuickActionBar {
                             return;
                         };
                         let open_to_the_side = window.modifiers().alt;
+                        if !open_to_the_side
+                            && !matches!(preview_target, PreviewTarget::TabularData(_))
+                        {
+                            workspace.toggle_preview_in_place(active_item.as_ref(), window, cx);
+                            return;
+                        }
                         match &preview_target {
                             PreviewTarget::Story(source) => story_canvas::open(
                                 workspace,
@@ -148,5 +158,24 @@ impl QuickActionBar {
             });
 
         Some(button.into_any_element())
+    }
+
+    fn render_show_source_button(&self, preview: Box<dyn ItemHandle>) -> AnyElement {
+        let workspace_handle = self.workspace.clone();
+        IconButton::new("show-preview-source", IconName::Code)
+            .icon_size(IconSize::Small)
+            .style(ButtonStyle::Subtle)
+            .tooltip(Tooltip::for_action_title(
+                "Show Source",
+                &workspace::TogglePreview,
+            ))
+            .on_click(move |_, window, cx| {
+                if let Some(workspace) = workspace_handle.upgrade() {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.toggle_preview_in_place(preview.as_ref(), window, cx);
+                    });
+                }
+            })
+            .into_any_element()
     }
 }

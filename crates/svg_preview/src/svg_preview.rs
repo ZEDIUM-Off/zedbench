@@ -14,6 +14,10 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    workspace::register_in_place_preview(
+        crate::svg_preview_view::SvgPreviewView::in_place_preview,
+        cx,
+    );
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;

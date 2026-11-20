@@ -17,6 +17,7 @@ use workspace::{Item, OpenInPreview, Pane, Workspace};
 
 mod openui_library;
 mod openui_story;
+mod story_mount;
 mod zed_theme;
 
 use openui::Library;
@@ -28,7 +29,19 @@ actions!(
         /// Previews the OpenUI story of the active `.gpui-story` file.
         OpenCanvas,
         /// Previews the OpenUI story of the active `.gpui-story` file in a split.
-        OpenCanvasToTheSide
+        OpenCanvasToTheSide,
+        /// Mounts the slots of the active story in this window: leftDock,
+        /// rightDock and bottomDock as panels, statusStart and statusEnd in
+        /// the status bar.
+        MountStory,
+        /// Removes the story mounted in this window.
+        UnmountStory,
+        /// Toggles the left dock panel of the mounted story.
+        ToggleStoryLeftDock,
+        /// Toggles the right dock panel of the mounted story.
+        ToggleStoryRightDock,
+        /// Toggles the bottom dock panel of the mounted story.
+        ToggleStoryBottomDock
     ]
 );
 
@@ -43,6 +56,21 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &OpenCanvasToTheSide, window, cx| {
             open_active(workspace, true, window, cx)
+        });
+        workspace.register_action(|workspace, _: &MountStory, window, cx| {
+            story_mount::mount(workspace, window, cx)
+        });
+        workspace.register_action(|workspace, _: &UnmountStory, window, cx| {
+            story_mount::unmount(workspace, window, cx)
+        });
+        workspace.register_action(|workspace, _: &ToggleStoryLeftDock, window, cx| {
+            story_mount::toggle::<story_mount::LeftDock>(workspace, window, cx)
+        });
+        workspace.register_action(|workspace, _: &ToggleStoryRightDock, window, cx| {
+            story_mount::toggle::<story_mount::RightDock>(workspace, window, cx)
+        });
+        workspace.register_action(|workspace, _: &ToggleStoryBottomDock, window, cx| {
+            story_mount::toggle::<story_mount::BottomDock>(workspace, window, cx)
         });
         let Some(window) = window else {
             return;

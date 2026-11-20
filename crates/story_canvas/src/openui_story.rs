@@ -23,7 +23,14 @@ use theme::ActiveTheme as _;
 /// A story written in OpenUI Lang, interpreted on every render, so editing
 /// the file updates the preview without compiling anything.
 pub(crate) struct OpenUiStory {
+    library: Library,
+    source: String,
     document: Document,
+    /// One document per slot mounted in the window: the story whose root is
+    /// that slot. Every slot reads and writes the same state.
+    slots: HashMap<String, Document>,
+    /// The slot being rendered, so its actions resolve in its own document.
+    scope: Option<String>,
     /// State the story changed through actions and bindings. Variables it
     /// never touched read their declared defaults.
     state: HashMap<String, Value>,
@@ -35,7 +42,11 @@ pub(crate) struct OpenUiStory {
 impl OpenUiStory {
     pub(crate) fn new(library: &Library, source: &str) -> Self {
         Self {
+            library: library.clone(),
+            source: source.to_owned(),
             document: openui::parse(library, source),
+            slots: HashMap::default(),
+            scope: None,
             state: HashMap::default(),
             inputs: HashMap::default(),
             embedded: HashMap::default(),
@@ -46,9 +57,58 @@ impl OpenUiStory {
     /// Reparses the story and keeps its state, so an edit does not reset
     /// what the user clicked through.
     pub(crate) fn set_source(&mut self, library: &Library, source: &str, cx: &mut Context<Self>) {
+        self.library = library.clone();
+        self.source = source.to_owned();
         self.document = openui::parse(library, source);
+        for (slot, document) in &mut self.slots {
+            *document = openui::parse(library, &slot_source(source, slot));
+        }
         self.notice = None;
         cx.notify();
+    }
+
+    /// Whether the story defines `name` at its top level.
+    pub(crate) fn defines(&self, name: &str) -> bool {
+        self.document
+            .statements()
+            .iter()
+            .any(|statement| statement.name() == name)
+    }
+
+    /// Renders one slot of the story, for a part of the window it is
+    /// mounted in.
+    pub(crate) fn render_slot(
+        &mut self,
+        slot: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let document = self
+            .slots
+            .entry(slot.to_owned())
+            .or_insert_with(|| openui::parse(&self.library, &slot_source(&self.source, slot)))
+            .clone();
+        let evaluation = document.evaluate(&self.inputs());
+        let errors = evaluation
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .map(|diagnostic| diagnostic.to_string())
+            .collect::<Vec<_>>();
+        self.scope = Some(slot.to_owned());
+        let body = match evaluation.root() {
+            Some(root) => self.render_element(root, slot, window, cx),
+            None => error_line(format!("The story defines no {slot}").into(), cx),
+        };
+        self.scope = None;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .text_color(cx.theme().colors().text)
+            .children(errors.into_iter().map(|error| error_line(error.into(), cx)))
+            .child(body)
+            .into_any_element()
     }
 
     fn inputs(&self) -> Inputs {
@@ -59,11 +119,15 @@ impl OpenUiStory {
         inputs
     }
 
-    fn run(&mut self, plan: &ActionPlan, cx: &mut Context<Self>) {
+    fn run(&mut self, scope: Option<&str>, plan: &ActionPlan, cx: &mut Context<Self>) {
+        let document = scope
+            .and_then(|slot| self.slots.get(slot))
+            .unwrap_or(&self.document)
+            .clone();
         for step in plan.steps() {
             match step {
                 ActionStep::Set { target, value } => {
-                    let value = self.document.resolve(value, &self.inputs());
+                    let value = document.resolve(value, &self.inputs());
                     self.state.insert(target.clone(), value);
                 }
                 ActionStep::Reset { targets } => {
@@ -252,9 +316,10 @@ impl OpenUiStory {
                 }
                 if let Some(plan) = element.prop("action").and_then(Value::as_action) {
                     let plan = plan.clone();
-                    button = button.on_click(
-                        cx.listener(move |story, _: &ClickEvent, _, cx| story.run(&plan, cx)),
-                    );
+                    let scope = self.scope.clone();
+                    button = button.on_click(cx.listener(move |story, _: &ClickEvent, _, cx| {
+                        story.run(scope.as_deref(), &plan, cx)
+                    }));
                 }
                 button.into_any_element()
             }
@@ -294,9 +359,10 @@ impl OpenUiStory {
                     .children(trailing);
                 if let Some(plan) = element.prop("action").and_then(Value::as_action) {
                     let plan = plan.clone();
-                    row = row.cursor_pointer().on_click(
-                        cx.listener(move |story, _: &ClickEvent, _, cx| story.run(&plan, cx)),
-                    );
+                    let scope = self.scope.clone();
+                    row = row.cursor_pointer().on_click(cx.listener(
+                        move |story, _: &ClickEvent, _, cx| story.run(scope.as_deref(), &plan, cx),
+                    ));
                 }
                 row.into_any_element()
             }
@@ -596,6 +662,11 @@ impl Render for OpenUiStory {
             })
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))
     }
+}
+
+/// The story with `slot` as its root, so it can render alone.
+fn slot_source(source: &str, slot: &str) -> String {
+    format!("{source}\nroot = Column([{slot}], {{grow: true}})\n")
 }
 
 fn prop_str<'a>(element: &'a Element, name: &str) -> Option<&'a str> {

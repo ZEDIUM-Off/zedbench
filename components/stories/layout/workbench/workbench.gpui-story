@@ -1,22 +1,16 @@
-# extends: ../../zed/window.gpui-story
-# Workbench: machines, workspaces, worktrees, layouts and sessions, added to
-# the real Zedbench window. Only these slots change:
-# - sidebar: the Workbench, outside the workspace, where Zed puts its
-#   threads sidebar. Machines, their workspaces, the worktrees of the open one;
-# - titleEnd: the layouts of the workspace;
-# - leftDock: Zed's Project Panel and Git Panel, scoped to the worktree;
-# - center: the panes of the active layout;
+# Workbench: machines, workspaces, worktrees, layouts and sessions.
+# Mount it in the real window with "storybook: mount story": every slot below
+# goes to its place in Zedbench, and the rest of the window stays the real one.
+# - leftDock: the Workbench. Machines, their workspaces, the worktrees and
+#   layouts of the open workspace;
 # - rightDock: Sessions. Agents and terminals that hc keeps alive, and the
-#   history of every session that ended, like a list of past threads.
+#   history of every session that ended;
+# - statusStart, statusEnd: the active layout, and the agents waiting on you.
+# The preview below lays the same slots side by side.
 
-$leftOpen = true
-$rightOpen = true
-$bottomOpen = false
 $workspace = "app"
 $worktree = "checkout"
 $layout = "app-impl"
-$rail = false
-$dockTab = 0
 $sessionsTab = 0
 $onlyWorktree = false
 $historyKind = 0
@@ -74,38 +68,9 @@ layouts = [
   {id: "dots-edit", workspace: "dots", name: "Edit", key: "1"}
 ]
 
-# A pane shows any instance; its branch chip says where it comes from.
-panes = [
-  {layout: "app-impl", kind: "editor", tabs: [{label: "checkout.rs", icon: "file_rust", dirty: true}, {label: "cart.rs", icon: "file_rust"}], worktree: "checkout", body: "pub fn checkout(cart: &Cart) -> Result<Order> {\n    let total = cart.total()?;\n    payments::charge(total)?;\n    Ok(Order::from(cart))\n}"},
-  {layout: "app-impl", kind: "terminal", tabs: [{label: "t15", icon: "terminal", detail: "cargo watch"}], worktree: "checkout", body: "test cart::total ... ok\ntest checkout::charges ... FAILED\n\nexpected 1 order, got 0"},
-  {layout: "app-review", kind: "terminal", tabs: [{label: "t12", icon: "zed_agent", detail: "Review checkout"}], worktree: "checkout", body: "Should a failed charge keep the cart?\n> "},
-  {layout: "app-review", kind: "editor", tabs: [{label: "Diff main…feat/checkout", icon: "git_branch"}], worktree: "checkout", body: "M src/checkout.rs\nM src/cart.rs\nA tests/checkout.rs"},
-  {layout: "app-agents", kind: "terminal", tabs: [{label: "t11", icon: "zed_agent", detail: "Checkout flow"}], worktree: "checkout", body: "Working · turn 62"},
-  {layout: "app-agents", kind: "terminal", tabs: [{label: "t13", icon: "zed_agent", detail: "Login timeout"}], worktree: "login", body: "Done · ready for the next prompt"},
-  {layout: "app-agents", kind: "terminal", tabs: [{label: "t21", icon: "zed_agent", detail: "Rate limiter"}], worktree: "limits", body: "From acme-api: a layout may show another workspace's agent"},
-  {layout: "api-runs", kind: "terminal", tabs: [{label: "t21", icon: "zed_agent", detail: "Rate limiter"}], worktree: "limits", body: "Working · turn 15"},
-  {layout: "ds-edit", kind: "editor", tabs: [{label: "button.tsx", icon: "file"}], worktree: "ds-main", body: "export function Button(props: ButtonProps) {\n  return <button {...props} />\n}"},
-  {layout: "dots-edit", kind: "editor", tabs: [{label: "config.toml", icon: "file"}], worktree: "dots-main", body: "[editor]\ntheme = \"one-dark\""}
-]
-
-files = [
-  {worktree: "checkout", name: "src", depth: 0, icon: "folder_open", state: ""},
-  {worktree: "checkout", name: "checkout.rs", depth: 1, icon: "file_rust", state: "M"},
-  {worktree: "checkout", name: "cart.rs", depth: 1, icon: "file_rust", state: "M"},
-  {worktree: "checkout", name: "tests", depth: 0, icon: "folder_open", state: ""},
-  {worktree: "checkout", name: "checkout.rs", depth: 1, icon: "file_rust", state: "A"},
-  {worktree: "checkout", name: "Cargo.toml", depth: 0, icon: "file", state: "M"},
-  {worktree: "app-main", name: "src", depth: 0, icon: "folder", state: ""},
-  {worktree: "app-main", name: "Cargo.toml", depth: 0, icon: "file", state: ""},
-  {worktree: "login", name: "src", depth: 0, icon: "folder_open", state: ""},
-  {worktree: "login", name: "session.rs", depth: 1, icon: "file_rust", state: ""}
-]
-
 ws = @First(@Filter(workspaces, "id", "==", $workspace))
-machine = @First(@Filter(machines, "id", "==", ws.machine))
 wt = @First(@Filter(worktrees, "id", "==", $worktree))
 current = @First(@Filter(layouts, "id", "==", $layout))
-project = {name: ws.name, branch: wt.branch, machine: machine.name}
 myLayouts = @Filter(layouts, "workspace", "==", $workspace)
 mySessions = @Filter(sessions, "workspace", "==", $workspace)
 scoped = $onlyWorktree ? @Filter(mySessions, "worktree", "==", $worktree) : mySessions
@@ -115,61 +80,51 @@ terms = @Filter(live, "kind", "==", "terminal")
 ended = @Filter(@Filter(scoped, "status", "==", "off"), "name", "contains", $query)
 history = $historyKind == 1 ? @Filter(ended, "kind", "==", "agent") : $historyKind == 2 ? @Filter(ended, "kind", "==", "terminal") : ended
 blocked = @Filter(sessions, "status", "==", "blocked")
+nothing = Column([], {width: 0})
 
-sidebar = Row([$rail ? railView : treeView, Divider()], {align: "stretch"})
+root = Column([
+  Row([leftDock, Divider(), Column([Text("The real panes of the window go here.", "muted")], {grow: true, padding: 12}), Divider(), rightDock], {grow: true, align: "stretch"}),
+  Divider(),
+  Row([statusStart, Spacer(), statusEnd], {gap: 6, padding: 2, surface: "status_bar"})
+], {grow: true})
 
-titleStart = Button("", @Set($rail, !$rail), "ghost", false, "list_tree")
-
-titleEnd = Row([
-  Row(@Each(myLayouts, "l", Button(l.name, @Set($layout, l.id), "ghost", $layout == l.id, "split")), {gap: 2}),
-  Button("", @ToAssistant("New layout in " + ws.name), "ghost", false, "plus")
-], {gap: 2})
-
-statusStart = Text(ws.name + " · " + current.name, "small")
-statusEnd = Tag(@Count(blocked) + " need you", @Count(blocked) > 0 ? "danger" : "secondary")
-
-railView = Column(@Each(workspaces, "w", Button("", Action([@Set($workspace, w.id), @Set($layout, w.layout), @Set($worktree, @First(@Filter(worktrees, "workspace", "==", w.id)).id)]), "ghost", $workspace == w.id, $workspace == w.id ? "folder_open" : "folder")), {width: 44, gap: 2, padding: 4, surface: "panel"})
-
-treeView = Column([
+leftDock = Column([
   Row([Text("Workbench", "heading"), Spacer(), Button("", @ToAssistant("Open a workspace"), "ghost", false, "plus")], {gap: 6, padding: 6}),
   Column(@Each(machines, "m", Column([
     ListItem(m.name, null, false, m.icon, m.detail),
     Column(@Each(@Filter(workspaces, "machine", "==", m.id), "w", Column([
       ListItem(w.name, Action([@Set($workspace, w.id), @Set($layout, w.layout), @Set($worktree, @First(@Filter(worktrees, "workspace", "==", w.id)).id)]), $workspace == w.id, $workspace == w.id ? "folder_open" : "folder", null, 1, @Count(@Filter(@Filter(sessions, "workspace", "==", w.id), "status", "==", "blocked")) > 0 ? [Tag("!", "danger")] : []),
-      $workspace == w.id ? Column(@Each(@Filter(worktrees, "workspace", "==", w.id), "t",
-        ListItem(t.branch, @Set($worktree, t.id), $worktree == t.id, "git_branch", t.ahead + (t.changes > 0 ? " · " + t.changes + " changed" : ""), 2, [
-          Tag(@Count(@Filter(@Filter(@Filter(sessions, "worktree", "==", t.id), "kind", "==", "agent"), "status", "!=", "off")) + " ag", @Count(@Filter(@Filter(sessions, "worktree", "==", t.id), "status", "==", "blocked")) > 0 ? "danger" : "secondary"),
-          Tag(@Count(@Filter(@Filter(@Filter(sessions, "worktree", "==", t.id), "kind", "==", "terminal"), "status", "!=", "off")) + " sh", "secondary")
-        ])
-      )) : nothing,
-      $workspace == w.id ? ListItem("New worktree…", @ToAssistant("New worktree in " + w.name), false, "plus", null, 2) : nothing
+      $workspace == w.id ? Column([
+        Text("Worktrees", "small"),
+        Column(@Each(@Filter(worktrees, "workspace", "==", w.id), "t",
+          ListItem(t.branch, @Set($worktree, t.id), $worktree == t.id, "git_branch", t.ahead + (t.changes > 0 ? " · " + t.changes + " changed" : ""), 2, [
+            Tag(@Count(@Filter(@Filter(@Filter(sessions, "worktree", "==", t.id), "kind", "==", "agent"), "status", "!=", "off")) + " ag", @Count(@Filter(@Filter(sessions, "worktree", "==", t.id), "status", "==", "blocked")) > 0 ? "danger" : "secondary"),
+            Tag(@Count(@Filter(@Filter(@Filter(sessions, "worktree", "==", t.id), "kind", "==", "terminal"), "status", "!=", "off")) + " sh", "secondary")
+          ])
+        )),
+        ListItem("New worktree…", @ToAssistant("New worktree in " + w.name), false, "plus", null, 2),
+        Text("Layouts", "small"),
+        Column(@Each(myLayouts, "l", ListItem(l.name, @Set($layout, l.id), $layout == l.id, "split", "super+" + l.key, 2))),
+        ListItem("New layout…", @ToAssistant("New layout in " + w.name), false, "plus", null, 2)
+      ], {gap: 2}) : nothing
     ])))
   ], {gap: 2})), {gap: 6, grow: true, scroll: true, padding: 4})
-], {width: 280, surface: "panel"})
+], {grow: true, surface: "panel"})
 
-leftDock = Column([
-  Tabs(["Files", "Git"], $dockTab),
-  Row([Icon("git_branch", "accent"), Text(wt.path, "small")], {gap: 4, padding: 4}),
-  $dockTab == 0
-    ? Column(@Each(@Filter(files, "worktree", "==", $worktree), "f", ListItem(f.name, null, false, f.icon, null, f.depth, f.state == "" ? [] : [Tag(f.state, f.state == "A" ? "success" : "warning")])))
-    : Column([
-        Text(wt.ahead == "" ? "Base branch" : wt.ahead + " commits ahead of main", "small"),
-        Column(@Each(@Filter(@Filter(files, "worktree", "==", $worktree), "state", "!=", ""), "f", ListItem(f.name, null, false, f.icon, null, 0, [Tag(f.state, f.state == "A" ? "success" : "warning")]))),
-        Row([Button("Commit", @ToAssistant("Commit in " + wt.branch), "outline"), Button("Merge into main", @ToAssistant("Merge " + wt.branch), "ghost")], {gap: 4})
-      ], {gap: 6})
-], {width: 240, padding: 4, gap: 4, surface: "panel", scroll: true})
+statusStart = Row([
+  Icon("split", "muted"),
+  Text(ws.name + " · " + wt.branch + " ·", "small"),
+  Row(@Each(myLayouts, "l", Button(l.name, @Set($layout, l.id), "ghost", $layout == l.id)), {gap: 2})
+], {gap: 4})
 
-center = Row(@Each(@Filter(panes, "layout", "==", $layout), "p", Column([
-  PaneTabs(p.tabs, 0, [Tag(@First(@Filter(worktrees, "id", "==", p.worktree)).branch, p.worktree == $worktree ? "info" : "secondary")]),
-  p.kind == "terminal" ? Terminal(p.body) : Editor(p.body, 1, 2)
-], {grow: true})), {grow: true, align: "stretch"})
+statusEnd = Tag(@Count(blocked) + " need you", @Count(blocked) > 0 ? "danger" : "secondary")
 
 rightDock = Column([
   Tabs(["Agents · " + @Count(agents), "Terminals · " + @Count(terms), "History · " + @Count(ended)], $sessionsTab),
   Input($query, "Filter sessions"),
   Switch("Only " + wt.branch, $onlyWorktree),
   $sessionsTab == 0 ? agentsView : $sessionsTab == 1 ? termsView : historyView
-], {width: 300, padding: 6, gap: 6, surface: "panel", scroll: true})
+], {grow: true, padding: 6, gap: 6, surface: "panel", scroll: true})
 
 agentsView = Column([
   Text("Needs you", "error"),

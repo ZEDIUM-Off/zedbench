@@ -25,6 +25,9 @@ pub fn library() -> Result<Library, LibraryError> {
         Param::optional("width", Type::Number),
         Param::optional("height", Type::Number),
         Param::optional("grow", Type::Boolean),
+        Param::optional("flex", Type::Number),
+        Param::optional("wrap", Type::Boolean),
+        Param::optional("clip", Type::Boolean),
         Param::optional("scroll", Type::Boolean),
         Param::optional("border", Type::Boolean),
         Param::optional("rounded", Type::Boolean),
@@ -39,6 +42,13 @@ pub fn library() -> Result<Library, LibraryError> {
                 "title_bar",
                 "status_bar",
                 "tab_bar",
+                "terminal",
+                "muted",
+                "accent",
+                "success",
+                "warning",
+                "error",
+                "info",
             ]),
         ),
         Param::optional("align", Type::one_of(["start", "center", "end", "stretch"])),
@@ -50,19 +60,39 @@ pub fn library() -> Result<Library, LibraryError> {
     let children = || Param::required("children", Type::list(Type::component()));
     Library::builder()
         .component(
-            ComponentDef::new("Column", "Lays out children top to bottom")
-                .param(children())
-                .param(Param::optional("style", style.clone())),
+            ComponentDef::new(
+                "Column",
+                "Lays out children top to bottom; with an action, the whole column is clickable",
+            )
+            .param(children())
+            .param(Param::optional("style", style.clone()))
+            .param(Param::optional("action", Type::action()))
+            .param(Param::optional("selected", Type::Boolean)),
         )
         .component(
-            ComponentDef::new("Row", "Lays out children left to right")
-                .param(children())
-                .param(Param::optional("style", style)),
+            ComponentDef::new(
+                "Row",
+                "Lays out children left to right; with an action, the whole row is clickable",
+            )
+            .param(children())
+            .param(Param::optional("style", style))
+            .param(Param::optional("action", Type::action()))
+            .param(Param::optional("selected", Type::Boolean)),
+        )
+        .component(
+            ComponentDef::new(
+                "HoverCard",
+                "Shows content in a floating card beside the trigger while the pointer is over it",
+            )
+            .param(Param::required("trigger", Type::component()))
+            .param(Param::required("content", Type::component()))
+            .param(Param::optional("side", Type::one_of(["right", "bottom"]))),
         )
         .component(
             ComponentDef::new("Text", "A run of text")
                 .param(Param::required("text", Type::String))
-                .param(Param::optional("variant", Type::one_of(TEXT_VARIANTS))),
+                .param(Param::optional("variant", Type::one_of(TEXT_VARIANTS)))
+                .param(Param::optional("truncate", Type::Boolean)),
         )
         .component(
             ComponentDef::new("Code", "Monospace text that keeps its line breaks")
@@ -188,7 +218,12 @@ fn extends(source: &str) -> Option<&str> {
     source
         .lines()
         .take_while(|line| line.trim_start().starts_with('#'))
-        .find_map(|line| line.trim_start().strip_prefix('#')?.trim().strip_prefix("extends:"))
+        .find_map(|line| {
+            line.trim_start()
+                .strip_prefix('#')?
+                .trim()
+                .strip_prefix("extends:")
+        })
         .map(str::trim)
         .filter(|path| !path.is_empty())
 }

@@ -224,7 +224,7 @@ pub struct TitleBar {
 /// A place in the title bar where another crate can add a view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TitleBarSlot {
-    /// After the project and branch.
+    /// In place of the project and branch.
     Start,
     /// Between the project and the user menu.
     Center,
@@ -321,8 +321,9 @@ impl Render for TitleBar {
                 .h_full()
                 .gap_0p5()
                 .map(|title_bar| {
-                    let mut render_project_items = title_bar_settings.show_branch_name
-                        || title_bar_settings.show_project_items;
+                    let mut render_project_items = self.start_slot.is_none()
+                        && (title_bar_settings.show_branch_name
+                            || title_bar_settings.show_project_items);
                     title_bar
                         .when_some(
                             self.application_menu.clone().filter(|_| !show_menus),

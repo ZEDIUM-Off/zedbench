@@ -8,18 +8,21 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Pixels,
-    Render, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
+    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    Pixels, Render, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_kit::base::Root;
-use title_bar::{TitleBar, TitleBarSlot};
 use project::trusted_worktrees::{PathTrust, TrustedWorktrees};
 use project::{LocalProjectFlags, Project, ProjectPath};
+use settings::Settings as _;
+use theme::ActiveTheme as _;
+use title_bar::{TitleBar, TitleBarSlot};
 use util::ResultExt as _;
 use util::rel_path::RelPath;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
+use workspace::item::Item;
 use workspace::ui::IconName;
-use workspace::{AppState, ItemHandle, StatusItemView, Workspace};
+use workspace::{AppState, ItemHandle, StatusItemView, TabBarSettings, Workspace};
 
 use crate::openui_story::OpenUiStory;
 use crate::{ToggleStoryBottomDock, ToggleStoryLeftDock, ToggleStoryRightDock};
@@ -122,8 +125,20 @@ impl StatusSlot for StatusEnd {
 /// The real window of a story preview.
 pub(crate) struct StoryWindow {
     workspace: Entity<Workspace>,
+    story: Entity<OpenUiStory>,
+    /// The `sidebar` slot, beside the workspace over the window's whole
+    /// height, where a real window puts its own sidebar.
+    sidebar: Entity<Root>,
+    /// The `modal` slot, over the whole window while it renders something.
+    modal: Entity<Root>,
     _setup: Task<()>,
 }
+
+const SIDEBAR_SLOT: &str = "sidebar";
+const SIDEBAR_WIDTH: f32 = 240.;
+/// The slot that takes the place of the window's panes.
+const CENTER_SLOT: &str = "center";
+const MODAL_SLOT: &str = "modal";
 
 impl StoryWindow {
     pub(crate) fn new<V: 'static>(
@@ -155,9 +170,23 @@ impl StoryWindow {
             // from ever owning them, and without a multi-workspace it cannot
             // reach the real window's sidebar.
             workspace.set_multi_workspace(WeakEntity::new_invalid(), Rc::new(Cell::new(owner)), cx);
+            // A story that fills the center draws its own panes, so the
+            // pane that holds it shows no tab for it.
+            workspace.active_pane().update(cx, |pane, _| {
+                let story = story.downgrade();
+                pane.set_should_display_tab_bar(move |_, cx| {
+                    let fills_center = story
+                        .upgrade()
+                        .is_some_and(|story| story.read(cx).defines(CENTER_SLOT));
+                    !fills_center && TabBarSettings::get_global(cx).show
+                });
+            });
         });
         let story_window = Self {
-            _setup: Self::open_fixture(&project, &workspace, window, cx),
+            _setup: Self::open_fixture(&project, &workspace, story, window, cx),
+            sidebar: slot_root(story, SIDEBAR_SLOT, window, cx),
+            modal: transparent_slot_root(story, MODAL_SLOT, window, cx),
+            story: story.clone(),
             workspace,
         };
         story_window.sync(story, window, cx);
@@ -178,11 +207,13 @@ impl StoryWindow {
     fn open_fixture<V: 'static>(
         project: &Entity<Project>,
         workspace: &Entity<Workspace>,
+        story: &Entity<OpenUiStory>,
         window: &mut Window,
         cx: &mut Context<V>,
     ) -> Task<()> {
         let project = project.downgrade();
         let workspace = workspace.downgrade();
+        let story = story.downgrade();
         let directory = paths::temp_dir().join("story-window").join("acme-app");
         let written = cx.background_spawn({
             let directory = directory.clone();
@@ -223,6 +254,13 @@ impl StoryWindow {
             let Some(path) = RelPath::from_unix_str(OPENED_FILE).log_err() else {
                 return;
             };
+            // Opening a file would cover the panes a story draws itself.
+            let fills_center = story
+                .read_with(cx, |story, _| story.defines(CENTER_SLOT))
+                .unwrap_or(false);
+            if fills_center {
+                return;
+            }
             let opened = workspace.update_in(cx, |workspace, window, cx| {
                 let project_path = ProjectPath {
                     worktree_id: worktree.read(cx).id(),
@@ -242,13 +280,42 @@ impl StoryWindow {
     pub(crate) fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         let workspace = self.workspace.clone();
         let key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
+        let sidebar = self.story.read(cx).defines(SIDEBAR_SLOT).then(|| {
+            let width = self
+                .story
+                .update(cx, |story, _| story.slot_width(SIDEBAR_SLOT))
+                .unwrap_or(SIDEBAR_WIDTH);
+            div()
+                .flex_none()
+                .h_full()
+                .w(px(width))
+                .border_r_1()
+                .border_color(cx.theme().colors().border)
+                .child(self.sidebar.clone())
+        });
+        let modal_open = self.story.read(cx).defines(MODAL_SLOT)
+            && !self
+                .story
+                .update(cx, |story, _| story.slot_is_empty(MODAL_SLOT));
         workspace
             .update(cx, |workspace, cx| {
                 workspace.actions(div().flex(), window, cx)
             })
             .key_context(key_context)
+            .relative()
             .size_full()
-            .child(workspace)
+            .children(sidebar)
+            .child(div().flex_1().min_w_0().h_full().child(workspace))
+            .when(modal_open, |story_window| {
+                story_window.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .bg(gpui::black().opacity(0.4))
+                        .child(self.modal.clone()),
+                )
+            })
             .into_any_element()
     }
 
@@ -261,6 +328,7 @@ impl StoryWindow {
             sync_panel::<BottomDock>(workspace, story, window, cx);
             sync_status::<StatusStart>(workspace, story, window, cx);
             sync_status::<StatusEnd>(workspace, story, window, cx);
+            sync_center(workspace, story, window, cx);
         });
         sync_title(&self.workspace, story, window, cx);
     }
@@ -306,6 +374,21 @@ fn slot_root(
         _changes: cx.observe(story, |_, _, cx| cx.notify()),
     });
     cx.new(|cx| Root::new(content, window, cx))
+}
+
+/// A root paints the window's background. A slot drawn over something else
+/// (a bar, or the window under a modal) must let it show through.
+fn transparent_slot_root(
+    story: &Entity<OpenUiStory>,
+    slot: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<Root> {
+    let root = slot_root(story, slot, window, cx);
+    root.update(cx, |root, _| {
+        root.style().background = Some(gpui::transparent_black().into());
+    });
+    root
 }
 
 pub(crate) struct StoryPanel<D: DockSlot> {
@@ -426,6 +509,65 @@ fn sync_panel<D: DockSlot>(
     }
 }
 
+/// The story's `center` slot, as the only item of the window's pane.
+struct StoryPaneItem {
+    root: Entity<Root>,
+    focus: FocusHandle,
+}
+
+impl Render for StoryPaneItem {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .track_focus(&self.focus)
+            .size_full()
+            .child(self.root.clone())
+    }
+}
+
+impl Focusable for StoryPaneItem {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<()> for StoryPaneItem {}
+
+impl Item for StoryPaneItem {
+    type Event = ();
+
+    fn tab_content_text(&self, _: usize, _: &App) -> gpui::SharedString {
+        "Layout".into()
+    }
+}
+
+fn sync_center(
+    workspace: &mut Workspace,
+    story: &Entity<OpenUiStory>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let wanted = story.read(cx).defines(CENTER_SLOT);
+    let existing = workspace.items_of_type::<StoryPaneItem>(cx).next();
+    match (existing, wanted) {
+        (Some(item), false) => {
+            if let Some(pane) = workspace.pane_for(&item) {
+                pane.update(cx, |pane, cx| {
+                    pane.remove_item(item.entity_id(), false, false, window, cx)
+                });
+            }
+        }
+        (None, true) => {
+            let root = slot_root(story, CENTER_SLOT, window, cx);
+            let item = cx.new(|cx| StoryPaneItem {
+                root,
+                focus: cx.focus_handle(),
+            });
+            workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
+        }
+        _ => {}
+    }
+}
+
 fn sync_status<S: StatusSlot>(
     workspace: &mut Workspace,
     story: &Entity<OpenUiStory>,
@@ -434,15 +576,13 @@ fn sync_status<S: StatusSlot>(
 ) {
     let wanted = story.read(cx).defines(S::SLOT);
     let status_bar = workspace.status_bar().clone();
-    let position = status_bar
-        .read(cx)
-        .position_of_item::<StoryStatusItem<S>>();
+    let position = status_bar.read(cx).position_of_item::<StoryStatusItem<S>>();
     match (position, wanted) {
         (Some(position), false) => {
             status_bar.update(cx, |status_bar, cx| status_bar.remove_item_at(position, cx));
         }
         (None, true) => {
-            let root = slot_root(story, S::SLOT, window, cx);
+            let root = transparent_slot_root(story, S::SLOT, window, cx);
             let item = cx.new(|_| StoryStatusItem::<S> {
                 root,
                 _side: PhantomData,
@@ -486,7 +626,7 @@ fn sync_title(
             match (title_bar.slot(slot).is_some(), story.read(cx).defines(name)) {
                 (true, false) => title_bar.set_slot(slot, None, cx),
                 (false, true) => {
-                    let root = slot_root(story, name, window, cx);
+                    let root = transparent_slot_root(story, name, window, cx);
                     title_bar.set_slot(slot, Some(root.into()), cx);
                 }
                 _ => {}

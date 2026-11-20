@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::str::FromStr as _;
+use std::time::Duration;
 
 use gpui::{
     AnyElement, AnyView, ClickEvent, Context, Entity, Hsla, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px, svg,
+    Subscription, Task, Window, anchored, deferred, div, prelude::*, px, svg,
 };
 use gpui_kit::component::{
     Selectable as _, Sizable as _,
@@ -16,9 +17,14 @@ use gpui_kit::component::{
     tag::Tag,
 };
 use icons::IconName;
-use workspace::ui::{Tab as ZedTab, TabBar, TabPosition, Toggleable as _};
 use openui::{ActionPlan, ActionStep, Document, Element, Inputs, Library, Severity, Value};
 use theme::ActiveTheme as _;
+use util::ResultExt as _;
+use workspace::ui::{Tab as ZedTab, TabBar, TabPosition, Toggleable as _};
+
+/// How long the pointer rests on a trigger before its hover card shows, so
+/// crossing a list of triggers does not flash a card for each.
+const HOVER_CARD_DELAY: Duration = Duration::from_millis(250);
 
 /// A story written in OpenUI Lang, interpreted on every render, so editing
 /// the file updates the preview without compiling anything.
@@ -36,6 +42,9 @@ pub(crate) struct OpenUiStory {
     state: HashMap<String, Value>,
     inputs: HashMap<SharedString, (Entity<InputState>, Subscription)>,
     embedded: HashMap<String, Result<AnyView, SharedString>>,
+    /// The hover card whose trigger is under the pointer.
+    hovered: Option<SharedString>,
+    _show_hover_card: Option<Task<()>>,
     notice: Option<SharedString>,
 }
 
@@ -50,6 +59,8 @@ impl OpenUiStory {
             state: HashMap::default(),
             inputs: HashMap::default(),
             embedded: HashMap::default(),
+            hovered: None,
+            _show_hover_card: None,
             notice: None,
         }
     }
@@ -109,6 +120,52 @@ impl OpenUiStory {
             .children(errors.into_iter().map(|error| error_line(error.into(), cx)))
             .child(body)
             .into_any_element()
+    }
+
+    /// Evaluates a slot and reads the element it renders, if any.
+    fn read_slot<R>(&mut self, slot: &str, read: impl FnOnce(Option<&Element>) -> R) -> R {
+        let document = self
+            .slots
+            .entry(slot.to_owned())
+            .or_insert_with(|| openui::parse(&self.library, &slot_source(&self.source, slot)))
+            .clone();
+        let evaluation = document.evaluate(&self.inputs());
+        let children = evaluation
+            .root()
+            .and_then(|root| root.prop("children"))
+            .and_then(Value::as_array);
+        let content: Option<&Element> = match children.and_then(|children| children.first()) {
+            Some(Value::Element(content)) => Some(content),
+            _ => None,
+        };
+        read(content)
+    }
+
+    /// The width a slot asks for in its own style, for the parts of the
+    /// window that have no size of their own.
+    pub(crate) fn slot_width(&mut self, slot: &str) -> Option<f32> {
+        self.read_slot(slot, |content| match content?.prop("style") {
+            Some(Value::Object(style)) => style
+                .get("width")
+                .and_then(Value::as_f64)
+                .map(|width| width as f32),
+            _ => None,
+        })
+    }
+
+    /// Whether a slot renders nothing: no element, or a container without
+    /// children. A story closes its modal this way.
+    pub(crate) fn slot_is_empty(&mut self, slot: &str) -> bool {
+        self.read_slot(slot, |content| match content {
+            Some(content) => {
+                matches!(content.component(), "Column" | "Row")
+                    && content
+                        .prop("children")
+                        .and_then(Value::as_array)
+                        .is_none_or(|children| children.is_empty())
+            }
+            None => true,
+        })
     }
 
     fn inputs(&self) -> Inputs {
@@ -213,6 +270,16 @@ impl OpenUiStory {
                     if flag("grow") {
                         container = container.flex_1().flex_basis(px(0.)).min_w_0().min_h_0();
                     }
+                    if let Some(flex) = number("flex") {
+                        container = container.flex_basis(px(0.)).min_w_0().min_h_0();
+                        container.style().flex_grow = Some(flex.max(0.) as f32);
+                    }
+                    if flag("wrap") {
+                        container = container.flex_wrap();
+                    }
+                    if flag("clip") {
+                        container = container.overflow_hidden();
+                    }
                     if flag("scroll") {
                         container = if element.component() == "Row" {
                             container.overflow_x_scroll()
@@ -238,6 +305,13 @@ impl OpenUiStory {
                             container = container.bg(colors.status_bar_background)
                         }
                         Some("tab_bar") => container = container.bg(colors.tab_bar_background),
+                        Some("terminal") => container = container.bg(colors.terminal_background),
+                        Some("muted") => container = container.bg(colors.element_background),
+                        Some("accent") => container = container.bg(colors.text_accent),
+                        Some("success") => container = container.bg(cx.theme().status().success),
+                        Some("warning") => container = container.bg(cx.theme().status().warning),
+                        Some("error") => container = container.bg(cx.theme().status().error),
+                        Some("info") => container = container.bg(cx.theme().status().info),
                         _ => {}
                     }
                     match style.get("align").and_then(Value::as_str) {
@@ -255,11 +329,93 @@ impl OpenUiStory {
                         _ => {}
                     }
                 }
+                if element.prop("selected").and_then(Value::as_bool) == Some(true) {
+                    container = container.bg(colors.element_selected);
+                }
+                if let Some(plan) = element.prop("action").and_then(Value::as_action) {
+                    let plan = plan.clone();
+                    let scope = self.scope.clone();
+                    container = container
+                        .role(gpui::Role::Button)
+                        .aria_label(shown_text(element))
+                        .cursor_pointer()
+                        .hover(|container| container.bg(colors.ghost_element_hover))
+                        .on_click(cx.listener(move |story, _: &ClickEvent, _, cx| {
+                            story.run(scope.as_deref(), &plan, cx)
+                        }));
+                }
                 let children = element
                     .prop("children")
                     .map(|children| self.render_value(children, path, window, cx))
                     .unwrap_or_default();
                 container.children(children).into_any_element()
+            }
+            "HoverCard" => {
+                let trigger = element
+                    .prop("trigger")
+                    .map(|trigger| {
+                        self.render_value(trigger, &format!("{path}.trigger"), window, cx)
+                    })
+                    .unwrap_or_default();
+                let card = (self.hovered.as_ref() == Some(&id))
+                    .then(|| element.prop("content"))
+                    .flatten()
+                    .map(|content| self.render_value(content, &format!("{path}.card"), window, cx));
+                let below = prop_str(element, "side") == Some("bottom");
+                div()
+                    .id(id.clone())
+                    .relative()
+                    .on_hover(cx.listener(move |story, hovered: &bool, _, cx| {
+                        if *hovered {
+                            let id = id.clone();
+                            story._show_hover_card = Some(cx.spawn(async move |story, cx| {
+                                cx.background_executor().timer(HOVER_CARD_DELAY).await;
+                                story
+                                    .update(cx, |story, cx| {
+                                        story.hovered = Some(id);
+                                        cx.notify();
+                                    })
+                                    .log_err();
+                            }));
+                        } else {
+                            story._show_hover_card = None;
+                            if story.hovered.as_ref() == Some(&id) {
+                                story.hovered = None;
+                                cx.notify();
+                            }
+                        }
+                    }))
+                    .children(trigger)
+                    .when_some(card, |trigger, card| {
+                        let card = div()
+                            .p_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.elevated_surface_background)
+                            .shadow_lg()
+                            .children(card);
+                        // The card is drawn after the window, anchored to the
+                        // trigger's edge, so a dock never clips it.
+                        trigger.child(
+                            div()
+                                .absolute()
+                                .map(|anchor| {
+                                    if below {
+                                        anchor.left_0().top_full().pt_1()
+                                    } else {
+                                        anchor.top_0().left_full().pl_1()
+                                    }
+                                })
+                                .child(
+                                    deferred(
+                                        anchored().snap_to_window_with_margin(px(8.)).child(card),
+                                    )
+                                    .with_priority(1),
+                                ),
+                        )
+                    })
+                    .into_any_element()
             }
             "Text" => {
                 let variant = prop_str(element, "variant").unwrap_or("body");
@@ -273,6 +429,9 @@ impl OpenUiStory {
                 };
                 if let Some(color) = tone_color(variant, cx) {
                     label = label.text_color(color);
+                }
+                if element.prop("truncate").and_then(Value::as_bool) == Some(true) {
+                    label = label.min_w_0().truncate();
                 }
                 label.into_any_element()
             }
@@ -345,24 +504,31 @@ impl OpenUiStory {
                 if let Some(icon_name) = prop_str(element, "icon") {
                     row = row.child(icon(icon_name, colors.text_muted));
                 }
-                row = row
-                    .child(div().flex_1().min_w_0().truncate().child(text("label")))
-                    .when_some(prop_str(element, "detail"), |row, detail| {
-                        row.child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .truncate()
-                                .child(detail.to_owned()),
-                        )
-                    })
-                    .children(trailing);
+                let mut label = div().min_w_0().truncate().child(text("label"));
+                label.style().flex_grow = Some(1.);
+                let detail = prop_str(element, "detail").map(|detail| {
+                    let mut detail = div()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(colors.text_muted)
+                        .truncate()
+                        .child(detail.to_owned());
+                    // The label keeps its width: in a narrow row, the detail
+                    // gives way first.
+                    detail.style().flex_shrink = Some(1000.);
+                    detail
+                });
+                row = row.child(label).children(detail).children(trailing);
                 if let Some(plan) = element.prop("action").and_then(Value::as_action) {
                     let plan = plan.clone();
                     let scope = self.scope.clone();
-                    row = row.cursor_pointer().on_click(cx.listener(
-                        move |story, _: &ClickEvent, _, cx| story.run(scope.as_deref(), &plan, cx),
-                    ));
+                    row = row
+                        .role(gpui::Role::Button)
+                        .aria_label(text("label"))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |story, _: &ClickEvent, _, cx| {
+                            story.run(scope.as_deref(), &plan, cx)
+                        }));
                 }
                 row.into_any_element()
             }
@@ -470,32 +636,36 @@ impl OpenUiStory {
                     } else {
                         TabPosition::Middle(index.cmp(&selected))
                     };
-                    let mut zed_tab = ZedTab::new(SharedString::from(format!("{path}.tab.{index}")))
-                        .position(position)
-                        .toggle_state(index == selected)
-                        .start_slot::<AnyElement>(field("icon").map(|name| icon(&name, colors.text_muted)))
-                        .end_slot::<AnyElement>(dirty.then(|| {
-                            div()
-                                .size_1p5()
-                                .rounded_full()
-                                .bg(colors.text_accent)
-                                .into_any_element()
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_1()
-                                .child(field("label").unwrap_or_default())
-                                .when_some(field("detail"), |label, detail| {
-                                    label.child(
-                                        div().text_color(colors.text_muted).child(detail),
-                                    )
-                                }),
-                        );
+                    let mut zed_tab =
+                        ZedTab::new(SharedString::from(format!("{path}.tab.{index}")))
+                            .position(position)
+                            .toggle_state(index == selected)
+                            .start_slot::<AnyElement>(
+                                field("icon").map(|name| icon(&name, colors.text_muted)),
+                            )
+                            .end_slot::<AnyElement>(dirty.then(|| {
+                                div()
+                                    .size_1p5()
+                                    .rounded_full()
+                                    .bg(colors.text_accent)
+                                    .into_any_element()
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .child(field("label").unwrap_or_default())
+                                    .when_some(field("detail"), |label, detail| {
+                                        label.child(
+                                            div().text_color(colors.text_muted).child(detail),
+                                        )
+                                    }),
+                            );
                     if let Some(binding) = binding.clone() {
-                        zed_tab = zed_tab.on_click(cx.listener(move |story, _: &ClickEvent, _, cx| {
-                            story.set_state(&binding, Value::from(index as f64), cx)
-                        }));
+                        zed_tab =
+                            zed_tab.on_click(cx.listener(move |story, _: &ClickEvent, _, cx| {
+                                story.set_state(&binding, Value::from(index as f64), cx)
+                            }));
                     }
                     bar = bar.child(zed_tab);
                 }
@@ -667,6 +837,32 @@ impl Render for OpenUiStory {
 /// The story with `slot` as its root, so it can render alone.
 fn slot_source(source: &str, slot: &str) -> String {
     format!("{source}\nroot = Column([{slot}], {{grow: true}})\n")
+}
+
+/// The text a clickable container shows. It names the container for a tool
+/// that reads the window instead of looking at it.
+fn shown_text(element: &Element) -> String {
+    fn collect(value: &Value, words: &mut Vec<String>) {
+        match value {
+            Value::Element(element) if matches!(element.component(), "Text" | "Tag") => {
+                if let Some(text) = prop_str(element, "text").filter(|text| !text.is_empty()) {
+                    words.push(text.to_owned());
+                }
+            }
+            Value::Element(element) => {
+                if let Some(children) = element.prop("children") {
+                    collect(children, words);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, words)),
+            _ => {}
+        }
+    }
+    let mut words = Vec::new();
+    if let Some(children) = element.prop("children") {
+        collect(children, &mut words);
+    }
+    words.join(" ")
 }
 
 fn prop_str<'a>(element: &'a Element, name: &str) -> Option<&'a str> {

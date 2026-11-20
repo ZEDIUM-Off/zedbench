@@ -1,0 +1,346 @@
+# extends: zed/window
+# Layout tabs: layouts are the first level of the window, like the tabs of a
+# browser, and no workspace is "the current one".
+# - sidebar: the open layouts as vertical tabs, in groups. Hovering a tab
+#   shows a miniature of its panes and what runs in them. The bar folds to
+#   icons. Closing a tab keeps the layout saved and its processes running.
+# - center: the panes of the active layout. A layout shows one workspace,
+#   several side by side, or the whole system (the control layout).
+# - titleStart: the active layout and its scope: the workspaces its panels
+#   list. It takes the place of Zed's project and branch. Changing the scope
+#   changes the tab, not the saved layout, until you save.
+# - titleCenter: opens the palette.
+# - modal: the palette, over the window. It reaches any layout, workspace or
+#   agent, and adds a workspace to the active layout.
+# - titleEnd: the agents that need you, on every machine.
+# - leftDock: what the scope contains, and nothing else.
+# - statusStart: where a new terminal or agent of this layout starts.
+# Every name, file and session below is made up.
+
+$layout = "checkout"
+$narrow = false
+$folded = ""
+$palette = false
+$library = false
+$edited = false
+$query = ""
+$reply = ""
+
+groups = [
+  {id: "pinned", name: "Pinned", tone: "muted"},
+  {id: "ship", name: "Ship checkout", tone: "accent"},
+  {id: "ops", name: "Operations", tone: "warning"},
+  {id: "read", name: "Research", tone: "success"}
+]
+
+workspaces = [
+  {id: "app", name: "acme-app", machine: "workstation", branches: "main · feat/checkout · fix/login-timeout"},
+  {id: "api", name: "acme-api", machine: "buildbox", branches: "main · feat/rate-limit"},
+  {id: "notes", name: "research-notes", machine: "workstation", branches: "main"},
+  {id: "home", name: "~ (no project)", machine: "buildbox", branches: ""}
+]
+
+# stage is where the agent's mission stands once the agent stops: delivered,
+# then verified by another agent, then accepted by you.
+agents = [
+  {id: "a1", name: "Checkout flow", workspace: "app", branch: "feat/checkout", status: "working", stage: "", note: "turn 62 · editing checkout.rs", layout: "checkout"},
+  {id: "a2", name: "Review checkout", workspace: "app", branch: "feat/checkout", status: "blocked", stage: "", note: "Asks: keep the retry on declined cards?", layout: "review"},
+  {id: "a3", name: "Login timeout", workspace: "app", branch: "fix/login-timeout", status: "done", stage: "delivered", note: "3 commits · waits for a review", layout: "control"},
+  {id: "a4", name: "Rate limiter", workspace: "api", branch: "feat/rate-limit", status: "blocked", stage: "", note: "Asks: which quota per key?", layout: "limits"},
+  {id: "a5", name: "Contract check", workspace: "api", branch: "main", status: "working", stage: "", note: "turn 9 · comparing schemas", layout: "contract"},
+  {id: "a6", name: "Summarize papers", workspace: "notes", branch: "main", status: "done", stage: "verified", note: "12 notes · waits for you", layout: "reading"},
+  {id: "a7", name: "Nightly backup check", workspace: "home", branch: "", status: "working", stage: "", note: "turn 3 · reading logs", layout: "control"},
+  {id: "a8", name: "Inbox triage", workspace: "home", branch: "", status: "idle", stage: "", note: "idle for 2 h", layout: "control"}
+]
+
+terminals = [
+  {id: "s1", name: "cargo watch -x test", workspace: "app", branch: "feat/checkout", layout: "checkout"},
+  {id: "s2", name: "Load test", workspace: "api", branch: "feat/rate-limit", layout: "limits"},
+  {id: "s3", name: "Contract tests", workspace: "api", branch: "main", layout: "contract"}
+]
+
+ended = [
+  {name: "Plan checkout", detail: "acme-app · 21 turns · today 09:40"},
+  {name: "Reproduce login bug", detail: "acme-app · 15 turns · yesterday"},
+  {name: "Design limits", detail: "acme-api · 30 turns · yesterday"},
+  {name: "Read survey on caching", detail: "research-notes · 18 turns · Monday"}
+]
+
+saved = [
+  {name: "Release day", detail: "acme-app + acme-api"},
+  {name: "Design review", detail: "design-system"},
+  {name: "Weekly review", detail: "All machines"}
+]
+
+# A layout: its scope, where its new instances start, and its panes as
+# columns. A pane has a kind: editor, terminal, agent, board, system, history.
+layouts = [
+  {id: "control", group: "pinned", name: "Control", icon: "screen", key: "1", scope: ["app", "api", "notes", "home"], scopeLabel: "All machines", target: "~ on buildbox", savedAt: "saved",
+    columns: [
+      {flex: 3, panes: [{flex: 1, kind: "board", tabs: [{label: "Agents", icon: "zed_agent"}], text: "", who: "", status: ""}]},
+      {flex: 2, panes: [
+        {flex: 1, kind: "system", tabs: [{label: "System", icon: "server"}], text: "", who: "", status: ""},
+        {flex: 1, kind: "history", tabs: [{label: "History", icon: "history_rerun"}], text: "", who: "", status: ""}
+      ]}
+    ]},
+  {id: "checkout", group: "ship", name: "Checkout", icon: "folder", key: "2", scope: ["app"], scopeLabel: "acme-app", target: "acme-app · feat/checkout", savedAt: "saved",
+    columns: [
+      {flex: 3, panes: [{flex: 1, kind: "editor", tabs: [{label: "checkout.rs", icon: "file_rust", dirty: true}, {label: "cart.rs", icon: "file_rust"}], line: 4, text: "use crate::cart::Cart;\n\npub fn pay(cart: &Cart) -> Receipt {\n    let total = cart.total();\n    let charge = gateway::charge(total)?;\n    Receipt::new(cart, charge)\n}\n", who: "", status: ""}]},
+      {flex: 2, panes: [
+        {flex: 3, kind: "agent", tabs: [{label: "Checkout flow", icon: "zed_agent"}], text: "", says: ["Moved the charge out of the cart.", "Running the tests of checkout.rs…", "12 passed, 1 failed: pay_declined_card."], who: "Checkout flow", status: "working"},
+        {flex: 2, kind: "terminal", tabs: [{label: "cargo watch -x test", icon: "terminal"}], text: "running 13 tests\ntest pay_empty_cart ... ok\ntest pay_declined_card ... FAILED\n\n12 passed; 1 failed", who: "", status: ""}
+      ]}
+    ]},
+  {id: "review", group: "ship", name: "Review checkout", icon: "folder", key: "3", scope: ["app"], scopeLabel: "acme-app", target: "acme-app · feat/checkout", savedAt: "saved",
+    columns: [
+      {flex: 1, panes: [{flex: 1, kind: "editor", tabs: [{label: "main ↔ feat/checkout", icon: "diff"}], line: 3, text: "  pub fn pay(cart: &Cart) -> Receipt {\n-     let charge = gateway::charge(cart.total());\n+     let charge = gateway::charge(cart.total())?;\n      Receipt::new(cart, charge)\n  }\n", who: "", status: ""}]},
+      {flex: 1, panes: [{flex: 1, kind: "agent", tabs: [{label: "Review checkout", icon: "zed_agent"}], text: "", says: ["Read the 4 changed files.", "The charge now fails early, which is right.", "One question before I approve:", "keep the retry on declined cards?"], who: "Review checkout", status: "blocked"}]}
+    ]},
+  {id: "contract", group: "ship", name: "API contract", icon: "split", key: "4", scope: ["app", "api"], scopeLabel: "acme-app + acme-api", target: "acme-api · main", savedAt: "changed 5 min ago",
+    columns: [
+      {flex: 1, panes: [{flex: 1, kind: "editor", tabs: [{label: "client.rs", icon: "file_rust", detail: "acme-app"}], line: 2, text: "pub async fn charge(total: Money) -> Result<Charge> {\n    post(\"/v2/charges\", &ChargeRequest { total }).await\n}\n", who: "", status: ""}]},
+      {flex: 1, panes: [
+        {flex: 3, kind: "editor", tabs: [{label: "charges.rs", icon: "file_rust", detail: "acme-api"}], line: 1, text: "#[post(\"/v2/charges\")]\npub async fn create(request: ChargeRequest) -> Charge {\n    limits::check(&request)?;\n    ledger::charge(request.total)\n}\n", who: "", status: ""},
+        {flex: 2, kind: "terminal", tabs: [{label: "Contract tests", icon: "terminal", detail: "buildbox"}], text: "$ cargo test contract\nrunning 6 tests\n6 passed; 0 failed", who: "", status: ""}
+      ]}
+    ]},
+  {id: "limits", group: "ops", name: "Rate limiter", icon: "folder", key: "5", scope: ["api"], scopeLabel: "acme-api", target: "acme-api · feat/rate-limit", savedAt: "saved",
+    columns: [
+      {flex: 1, panes: [{flex: 1, kind: "agent", tabs: [{label: "Rate limiter", icon: "zed_agent"}], text: "", says: ["The limiter counts per key and per minute.", "The load test holds at 400 requests a second.", "Before I write the defaults:", "which quota per key?"], who: "Rate limiter", status: "blocked"}]},
+      {flex: 1, panes: [{flex: 1, kind: "terminal", tabs: [{label: "Load test", icon: "terminal", detail: "buildbox"}], text: "$ loadtest --rate 400 --minutes 5\np50 12 ms · p99 48 ms\n0 errors, 0 limited", who: "", status: ""}]}
+    ]},
+  {id: "reading", group: "read", name: "Reading", icon: "book", key: "6", scope: ["notes"], scopeLabel: "research-notes", target: "research-notes · main", savedAt: "saved",
+    columns: [
+      {flex: 3, panes: [{flex: 1, kind: "editor", tabs: [{label: "caching.md", icon: "file_markdown"}], line: 3, text: "# Caching\n\nWrite-through keeps reads simple.\nInvalidation by key is enough below 10k writes a second.\n", who: "", status: ""}]},
+      {flex: 2, panes: [{flex: 1, kind: "agent", tabs: [{label: "Summarize papers", icon: "zed_agent"}], text: "", says: ["Summarized 12 papers into notes/.", "Another agent checked the citations.", "Ready for you to accept."], who: "Summarize papers", status: "done"}]}
+    ]}
+]
+
+current = @First(@Filter(layouts, "id", "==", $layout))
+waiting = @Filter(agents, "status", "==", "blocked")
+nothing = Column([], {width: 0})
+
+root = Column([
+  Row([titleStart, Spacer(), titleCenter, Spacer(), titleEnd], {gap: 6, padding: 4, surface: "title_bar"}),
+  Divider(),
+  Row([sidebar, Divider(), leftDock, Divider(), center], {grow: true, align: "stretch"}),
+  Divider(),
+  Row([statusStart], {padding: 2, surface: "status_bar"}),
+  modal
+], {grow: true})
+
+# ---- sidebar: the vertical tabs ----
+
+# A loop variable exists only where its loop is written: a tab defined on its
+# own line would not see `l`. So the tab and its hover card are written
+# inside the loop.
+sidebar = Column([
+  Row($narrow ? [Button("", @Set($narrow, false), "ghost", false, "chevron_right")] : [
+    Text("Layouts", "small"),
+    Spacer(),
+    Button("", @Set($palette, !$palette), "ghost", $palette, "magnifying_glass"),
+    Button("", @Set($narrow, true), "ghost", false, "chevron_left")
+  ], {gap: 2, padding: 6, justify: "center"}),
+  Column(@Each(groups, "g", Column([
+    Row($narrow ? [Column([], {width: 16, height: 3, rounded: true, surface: g.tone})] : [
+      Column([], {width: 3, height: 12, rounded: true, surface: g.tone}),
+      Text(g.name, "small", true),
+      Spacer(),
+      Text("" + @Count(@Filter(layouts, "group", "==", g.id)), "small"),
+      Icon($folded == g.id ? "chevron_right" : "chevron_down", "muted")
+    ], {gap: 6, padding: 6, justify: "center"}, @Set($folded, $folded == g.id ? "" : g.id)),
+    $folded == g.id ? nothing : Column(@Each(@Filter(layouts, "group", "==", g.id), "l", HoverCard(
+      Row($narrow ? [Icon(l.icon, $layout == l.id ? "accent" : "muted")] : [
+        Column([], {width: 2, height: 28, rounded: true, surface: $layout == l.id ? "accent" : "none"}),
+        Icon(l.icon, $layout == l.id ? "accent" : "muted"),
+        Column([
+          Text(l.name, "body", true),
+          Text(l.scopeLabel, "small", true)
+        ], {grow: true}),
+        @Count(@Filter(@Filter(agents, "layout", "==", l.id), "status", "==", "blocked")) > 0 ? Tag("" + @Count(@Filter(@Filter(agents, "layout", "==", l.id), "status", "==", "blocked")), "danger") : nothing,
+        Text(l.key, "small")
+      ], {gap: 8, padding: $narrow ? 8 : 4, rounded: true, justify: "center"}, @Set($layout, l.id), $layout == l.id),
+      Column([
+        Row([
+          Icon(l.icon, "accent"),
+          Text(l.name, "heading"),
+          Spacer(),
+          Text("ctrl-" + l.key, "small")
+        ], {gap: 6}),
+        Row(@Each(l.columns, "c", Column(@Each(c.panes, "p", Column([
+          Row([
+            p.status != "" ? Column([], {width: 6, height: 6, rounded: true, surface: p.status == "blocked" ? "error" : p.status == "working" ? "warning" : "success"}) : Icon(@First(p.tabs).icon, "muted"),
+            Text(@First(p.tabs).label, "small", true)
+          ], {gap: 4})
+        ], {flex: p.flex, padding: 4, border: true, rounded: true, clip: true, surface: p.kind == "terminal" ? "terminal" : p.kind == "editor" ? "editor" : "panel"})), {flex: c.flex, gap: 3, align: "stretch"})), {height: 108, gap: 3, align: "stretch"}),
+        Row([Icon("folder", "muted"), Text(l.scopeLabel, "small", true), Spacer(), Text(l.savedAt, "small")], {gap: 6}),
+        Column(@Each(@Filter(agents, "layout", "==", l.id), "a", Row([
+          Icon("zed_agent", "muted"),
+          Text(a.name, "body", true),
+          Spacer(),
+          Tag(a.status, a.status == "blocked" ? "danger" : a.status == "working" ? "warning" : a.status == "done" ? "success" : "secondary")
+        ], {gap: 6})), {gap: 3}),
+        Column(@Each(@Filter(terminals, "layout", "==", l.id), "s", Row([
+          Icon("terminal", "muted"),
+          Text(s.name, "body", true)
+        ], {gap: 6})), {gap: 3})
+      ], {width: 300, gap: 8}),
+      "right"
+    )), {gap: 1})
+  ], {gap: 1})), {gap: 8, grow: true, scroll: true, padding: 4}),
+  Divider(),
+  $narrow ? Column([
+    Button("", @ToAssistant("New layout"), "ghost", false, "plus"),
+    Button("", @Set($narrow, false), "ghost", false, "bookmark")
+  ], {gap: 2, padding: 6, align: "center"}) : Column([
+    ListItem("New layout", @ToAssistant("New layout"), false, "plus", "ctrl-t"),
+    ListItem("Saved layouts", @Set($library, !$library), $library, "bookmark", "" + @Count(saved)),
+    $library ? Column(@Each(saved, "s", ListItem(s.name, @ToAssistant("Open the layout " + s.name), false, "circle", s.detail, 1))) : nothing
+  ], {gap: 1, padding: 4})
+], {width: $narrow ? 48 : 236, grow: true, surface: "panel"})
+
+# ---- center: the panes of the active layout ----
+
+center = Row(@Each(current.columns, "c", Column(@Each(c.panes, "p", Column([
+  PaneTabs(p.tabs, 0),
+  p.kind == "editor" ? Editor(p.text, 1, p.line)
+    : p.kind == "terminal" ? Terminal(p.text)
+    : p.kind == "agent" ? Column([
+        Row([Text(p.who, "small"), Spacer(), Tag(p.status, p.status == "blocked" ? "danger" : p.status == "working" ? "warning" : "success")], {gap: 6}),
+        Column(@Each(p.says, "m", Text(m, "body")), {grow: true, scroll: true, gap: 6}),
+        Input($reply, p.status == "blocked" ? "Answer " + p.who : "Message " + p.who)
+      ], {grow: true, gap: 8, padding: 10, surface: "panel"})
+    : p.kind == "board" ? board
+    : p.kind == "system" ? system
+    : history
+], {flex: p.flex, clip: true, border: true})), {flex: c.flex, align: "stretch"})), {grow: true, align: "stretch", surface: "editor"})
+
+# One column per thing an agent can be waiting for. A click on a card opens
+# the layout that shows the agent.
+stages = [
+  {status: "blocked", name: "Needs you", tone: "error"},
+  {status: "done", name: "To accept", tone: "success"},
+  {status: "working", name: "Working", tone: "warning"},
+  {status: "idle", name: "Idle", tone: "muted"}
+]
+
+# The columns keep their width, so a narrow pane scrolls sideways instead of
+# squeezing the cards.
+board = Row(@Each(stages, "k", Column([
+  Row([
+    Column([], {width: 8, height: 8, rounded: true, surface: k.tone}),
+    Text(k.name, "body"),
+    Spacer(),
+    Text("" + @Count(@Filter(agents, "status", "==", k.status)), "small")
+  ], {gap: 6}),
+  Column(@Each(@Filter(agents, "status", "==", k.status), "a", Column([
+    Row([Icon("zed_agent", "muted"), Text(a.name, "body", true)], {gap: 6}),
+    Text(a.note, "small"),
+    Row([
+      Icon(a.branch != "" ? "git_branch" : "server", "muted"),
+      Text(@First(@Filter(workspaces, "id", "==", a.workspace)).name + (a.branch != "" ? " · " + a.branch : ""), "small", true)
+    ], {gap: 4}),
+    Row([
+      Text(@First(@Filter(workspaces, "id", "==", a.workspace)).machine, "small", true),
+      Spacer(),
+      a.stage != "" ? Tag(a.stage, "success") : nothing
+    ], {gap: 4})
+  ], {gap: 6, padding: 10, border: true, rounded: true, surface: "elevated"}, @Set($layout, a.layout), false)), {gap: 6})
+], {width: 216, gap: 8})), {grow: true, gap: 12, padding: 12, align: "start", scroll: true, surface: "panel"})
+
+system = Column([
+  Row([
+    Row([Text("" + @Count(agents), "heading"), Text("agents", "small")], {gap: 4}),
+    Row([Text("" + @Count(waiting), "heading"), Text("need you", "small")], {gap: 4}),
+    Row([Text("" + @Count(terminals), "heading"), Text("terminals", "small")], {gap: 4})
+  ], {gap: 12, wrap: true}),
+  Divider(),
+  Row([Icon("screen", "muted"), Column([Text("workstation", "body", true), Text("4 agents · 1 terminal", "small", true)], {grow: true})], {gap: 8}),
+  Row([Text("CPU", "small"), Column([Progress(34)], {grow: true}), Text("34 %", "small")], {gap: 8}),
+  Row([Text("RAM", "small"), Column([Progress(58)], {grow: true}), Text("58 %", "small")], {gap: 8}),
+  Row([Icon("server", "muted"), Column([Text("buildbox", "body", true), Text("4 agents · 2 terminals", "small", true)], {grow: true})], {gap: 8}),
+  Row([Text("CPU", "small"), Column([Progress(81)], {grow: true}), Text("81 %", "small")], {gap: 8}),
+  Row([Text("RAM", "small"), Column([Progress(46)], {grow: true}), Text("46 %", "small")], {gap: 8})
+], {grow: true, gap: 10, padding: 12, scroll: true, surface: "panel"})
+
+history = Column([
+  Text("Sessions that ended. An agent resumes where it stopped.", "small"),
+  Column(@Each(ended, "h", Row([
+    Icon("history_rerun", "muted"),
+    Column([Text(h.name, "body", true), Text(h.detail, "small", true)], {grow: true})
+  ], {gap: 8, padding: 4, rounded: true}, @ToAssistant("Resume " + h.name), false)), {gap: 1})
+], {grow: true, gap: 6, padding: 8, scroll: true, surface: "panel"})
+
+# ---- modal: the palette ----
+
+modal = $palette ? Column([
+  Column([
+    Row([
+      Icon("magnifying_glass", "muted"),
+      Column([Input($query, "Search layouts, workspaces and agents")], {grow: true}),
+      Button("esc", @Set($palette, false), "ghost")
+    ], {gap: 8}),
+    Divider(),
+    Column([
+      Text("Open layouts", "small"),
+      Column(@Each(@Filter(layouts, "name", "contains", $query), "l", ListItem(l.name, Action([@Set($layout, l.id), @Set($palette, false)]), $layout == l.id, l.icon, l.scopeLabel, 0, [Text("ctrl-" + l.key, "small")])), {gap: 1}),
+      Text("Agents", "small"),
+      Column(@Each(@Filter(agents, "name", "contains", $query), "a", ListItem(a.name, Action([@Set($layout, a.layout), @Set($palette, false)]), false, "zed_agent", @First(@Filter(workspaces, "id", "==", a.workspace)).name, 0, [
+        Tag(a.status, a.status == "blocked" ? "danger" : a.status == "working" ? "warning" : a.status == "done" ? "success" : "secondary")
+      ])), {gap: 1}),
+      Text("Workspaces", "small"),
+      Column(@Each(@Filter(workspaces, "name", "contains", $query), "w", ListItem(w.name, null, false, "folder", w.machine + (w.branches != "" ? " · " + w.branches : ""), 0, [
+        Button("Add to " + current.name, Action([@Set($edited, true), @Set($palette, false)]), "ghost", false, "plus"),
+        Button("New layout", @ToAssistant("New layout on " + w.name), "ghost")
+      ])), {gap: 1}),
+      Text("Saved layouts", "small"),
+      Column(@Each(@Filter(saved, "name", "contains", $query), "s", ListItem(s.name, @ToAssistant("Open the layout " + s.name), false, "bookmark", s.detail)), {gap: 1})
+    ], {gap: 6, grow: true, scroll: true})
+  ], {width: 680, height: 560, gap: 8, padding: 12, border: true, rounded: true, surface: "elevated"})
+], {grow: true, padding: 56, align: "center"}) : nothing
+
+# ---- title bar ----
+
+titleStart = Row([
+  Icon(current.icon, "accent"),
+  Text(current.name, "body"),
+  Text(current.scopeLabel, "small"),
+  $edited ? Tag("+ research-notes", "warning") : nothing,
+  Button("", @Set($palette, true), "ghost", false, "plus"),
+  $edited ? Button("Save layout", @Set($edited, false), "ghost") : nothing,
+  $edited ? Button("", @Set($edited, false), "ghost", false, "undo") : nothing
+], {gap: 6})
+
+titleCenter = Button("Search layouts, workspaces, agents    ctrl-k", @Set($palette, !$palette), "outline", $palette, "magnifying_glass")
+
+titleEnd = Button(@Count(waiting) + " need you", Action([@Set($layout, "control"), @Set($palette, false)]), @Count(waiting) > 0 ? "danger" : "ghost", false, "bell")
+
+# ---- left dock: what the scope contains ----
+
+leftDock = Column([
+  Row([Text("In scope", "small"), Spacer(), Text(current.scopeLabel, "small", true)], {gap: 6, padding: 8}),
+  Column(@Each(current.scope, "id", Column([
+    Row([
+      Icon("folder", "muted"),
+      Text(@First(@Filter(workspaces, "id", "==", id)).name, "body", true),
+      Spacer(),
+      Text(@First(@Filter(workspaces, "id", "==", id)).machine, "small")
+    ], {gap: 6, padding: 4}),
+    Column(@Each(@Filter(agents, "workspace", "==", id), "a", Row([
+      Column([], {width: 8}),
+      Icon("zed_agent", "muted"),
+      Column([Text(a.name, "body", true), Text(a.branch != "" ? a.branch : "no worktree", "small", true)], {grow: true}),
+      Tag(a.status, a.status == "blocked" ? "danger" : a.status == "working" ? "warning" : a.status == "done" ? "success" : "secondary")
+    ], {gap: 8, padding: 4, rounded: true}, @Set($layout, a.layout), false)), {gap: 1}),
+    Column(@Each(@Filter(terminals, "workspace", "==", id), "s", Row([
+      Column([], {width: 8}),
+      Icon("terminal", "muted"),
+      Column([Text(s.name, "body", true), Text(s.branch, "small", true)], {grow: true})
+    ], {gap: 8, padding: 4, rounded: true}, @Set($layout, s.layout), false)), {gap: 1})
+  ], {gap: 1})), {gap: 10, grow: true, scroll: true, padding: 4})
+], {grow: true, surface: "panel"})
+
+statusStart = Row([
+  Icon("plus", "muted"),
+  Text("New terminals and agents start in " + current.target, "small")
+], {gap: 4})

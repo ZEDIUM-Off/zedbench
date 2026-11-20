@@ -697,6 +697,20 @@ pub async fn handle_cli_connection(
                 let status = if open_workspace_result.is_err() { 1 } else { 0 };
                 responses.send(CliResponse::Exit { status }).log_err();
             }
+            CliRequest::Agent { args } => {
+                let result = cx.update(|cx| crate::zed::agent_control::run(args, cx));
+                let (response, status) = match result {
+                    Ok(message) => (CliResponse::Stdout { message }, 0),
+                    Err(error) => (
+                        CliResponse::Stderr {
+                            message: format!("{error:#}"),
+                        },
+                        1,
+                    ),
+                };
+                responses.send(response).log_err();
+                responses.send(CliResponse::Exit { status }).log_err();
+            }
             CliRequest::SetOpenBehavior { .. } => {
                 // We handle this case in a situation-specific way in
                 // resolve_open_behavior

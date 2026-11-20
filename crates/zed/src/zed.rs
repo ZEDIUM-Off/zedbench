@@ -1,3 +1,4 @@
+pub(crate) mod agent_control;
 mod app_menus;
 #[cfg(feature = "ai")]
 pub mod edit_prediction_registry;

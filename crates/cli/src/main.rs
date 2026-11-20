@@ -44,6 +44,10 @@ trait InstalledApp {
         user_data_dir: Option<&str>,
     ) -> io::Result<ExitStatus>;
     fn path(&self) -> PathBuf;
+    /// Whether an instance is running to receive requests.
+    fn is_running(&self, _user_data_dir: Option<&str>) -> bool {
+        true
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -148,6 +152,12 @@ struct Args {
     ))]
     #[arg(long)]
     uninstall: bool,
+
+    /// Control the running Zedbench for an agent. Run `--agent help` for the commands.
+    ///
+    /// Fails, rather than starting Zedbench, when no instance is running.
+    #[arg(long, num_args = 1.., allow_hyphen_values = true, value_name = "COMMAND")]
+    agent: Option<Vec<String>>,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
     /// by having Zedbench act like netcat communicating over a Unix socket.
@@ -534,6 +544,16 @@ fn run() -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
 
+    let agent = args.agent.clone();
+    if agent.is_some() {
+        // Starting the app from an agent's shell would open it where nobody sees
+        // it, such as an SSH session on Windows.
+        anyhow::ensure!(
+            app.is_running(user_data_dir.as_deref()),
+            "Zedbench is not running"
+        );
+    }
+
     let (server, server_name) =
         IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
     let url = format!("zed-cli://{server_name}");
@@ -670,18 +690,22 @@ fn run() -> Result<()> {
                 #[cfg(not(target_os = "windows"))]
                 let wsl = None;
 
-                let open_request = CliRequest::Open {
-                    paths,
-                    urls,
-                    diff_paths,
-                    diff_all: diff_all_mode,
-                    wsl,
-                    wait: args.wait,
-                    open_behavior,
-                    env,
-                    user_data_dir: user_data_dir_for_thread,
-                    dev_container: args.dev_container,
-                    cwd: env::current_dir().ok(),
+                let open_request = if let Some(agent_args) = agent {
+                    CliRequest::Agent { args: agent_args }
+                } else {
+                    CliRequest::Open {
+                        paths,
+                        urls,
+                        diff_paths,
+                        diff_all: diff_all_mode,
+                        wsl,
+                        wait: args.wait,
+                        open_behavior,
+                        env,
+                        user_data_dir: user_data_dir_for_thread,
+                        dev_container: args.dev_container,
+                        cwd: env::current_dir().ok(),
+                    }
                 };
 
                 tx.send(open_request)?;
@@ -891,6 +915,17 @@ mod linux {
                 },
                 self.0.display(),
             )
+        }
+
+        fn is_running(&self, user_data_dir: Option<&str>) -> bool {
+            let data_dir = user_data_dir
+                .map(PathBuf::from)
+                .unwrap_or_else(|| paths::data_dir().clone());
+            let sock_path = data_dir.join(format!(
+                "zed-{}.sock",
+                *release_channel::RELEASE_CHANNEL_NAME
+            ));
+            UnixDatagram::unbound().is_ok_and(|sock| sock.connect(&sock_path).is_ok())
         }
 
         fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -1168,6 +1203,10 @@ mod windows {
                 },
                 self.0.display(),
             )
+        }
+
+        fn is_running(&self, _user_data_dir: Option<&str>) -> bool {
+            !check_single_instance()
         }
 
         fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {

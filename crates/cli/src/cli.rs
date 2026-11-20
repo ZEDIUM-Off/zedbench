@@ -72,6 +72,10 @@ pub enum CliRequest {
     SetOpenBehavior {
         behavior: CliBehaviorSetting,
     },
+    /// A command from an agent controlling the running app.
+    Agent {
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

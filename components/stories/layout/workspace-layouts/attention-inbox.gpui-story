@@ -1,0 +1,39 @@
+# Workspace Layouts: Attention Inbox
+# Agents that wait on you first, then agents at work, then the rest.
+
+$selected = "t7"
+$showDone = true
+
+terminals = [
+  {id: "t1", name: "Dev server", kind: "terminal", status: "Live", worktree: "main", cwd: "/src/zedbench/crates/zed", preview: "$ cargo run -p zed\n   Running target/debug/zed"},
+  {id: "t2", name: "Shell", kind: "terminal", status: "Live", worktree: "main", cwd: "/src/zedbench", preview: "$ git status --short\n M crates/workspace/src/workspace.rs"},
+  {id: "t7", name: "Reconnect review", kind: "agent", agent: "Pi", status: "Blocked", worktree: "hc", cwd: "/src/zedbench-hc/crates/terminal_view", preview: "Pi · Reconnect review\n\nWhich restore path should keep the terminal reference?"},
+  {id: "t12", name: "Logs", kind: "terminal", status: "Live", worktree: "hc", cwd: "/tmp/zedbench-logs", preview: "$ tail -f core.log\n INFO reconnect finished"},
+  {id: "t9", name: "Fixture tests", kind: "agent", agent: "Codex", status: "Working", worktree: "layouts", cwd: "/src/zedbench-layouts/crates/workspace", preview: "Codex · Fixture tests\n\nChecking saved split trees…"},
+  {id: "t13", name: "Layout review", kind: "agent", agent: "Pi", status: "Done", worktree: "layouts", cwd: "/src/zedbench-layouts", preview: "Review complete. Ready for the next prompt."},
+  {id: "buildbox/t3", name: "Renderer benchmark", kind: "terminal", status: "Offline", worktree: "remote", cwd: "/srv/zedbench-render", preview: "Machine offline. Showing the last known directory."}
+]
+
+blocked = @Filter(terminals, "status", "==", "Blocked")
+working = @Filter(terminals, "status", "==", "Working")
+done = @Filter(terminals, "status", "==", "Done")
+current = @First(@Filter(terminals, "id", "==", $selected))
+
+root = Row([inbox, Divider(), detail], {grow: true, align: "stretch"})
+
+inbox = Column([
+  Row([Icon("bell", "warning"), Text("Needs you", "heading"), Spacer(), Tag(@Count(blocked) + "", "danger")], {gap: 6}),
+  Column(@Each(blocked, "t", ListItem(t.name, @Set($selected, t.id), $selected == t.id, "warning", t.agent + " · " + t.id))),
+  Divider(),
+  Row([Icon("sparkle", "accent"), Text("Working", "heading"), Spacer(), Tag(@Count(working) + "", "warning")], {gap: 6}),
+  Column(@Each(working, "t", ListItem(t.name, @Set($selected, t.id), $selected == t.id, "zed_agent", t.agent + " · " + t.id))),
+  Divider(),
+  Switch("Show finished agents", $showDone),
+  $showDone ? Column(@Each(done, "t", ListItem(t.name, @Set($selected, t.id), $selected == t.id, "check", t.agent + " · " + t.id))) : Spacer()
+], {width: 320, gap: 6, padding: 8, scroll: true, surface: "panel"})
+
+detail = Column([
+  Row([Icon(current.kind == "agent" ? "zed_agent" : "terminal"), Text(current.name, "heading"), Tag(current.status, current.status == "Blocked" ? "danger" : "info"), Spacer(), Text(current.cwd, "code")], {gap: 6}),
+  Code(current.preview),
+  current.status == "Blocked" ? Row([Button("Answer", @ToAssistant("Answer " + current.id), "primary"), Button("Open terminal", @ToAssistant("Focus " + current.id), "ghost")], {gap: 6}) : Text("Nothing to answer.", "muted")
+], {grow: true, gap: 8, padding: 12})

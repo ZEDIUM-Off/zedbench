@@ -1,3 +1,2 @@
-{
-  "story": "Select"
-}
+root = Column([story], {grow: true})
+story = KitStory("Select")

@@ -1,4 +1,2 @@
-{
-  "library": "gpui-ai",
-  "story": "prompt-bar"
-}
+root = Column([story], {grow: true})
+story = AiStory("prompt-bar")

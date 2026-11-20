@@ -1,3 +1,2 @@
-{
-  "story": "MessageScroller"
-}
+root = Column([story], {grow: true})
+story = KitStory("MessageScroller")

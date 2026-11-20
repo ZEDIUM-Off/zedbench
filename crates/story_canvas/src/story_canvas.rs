@@ -5,40 +5,28 @@ use gpui::{
 use gpui_kit::base::Root;
 use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBuffer;
-use serde::Deserialize;
 use std::path::Path;
 use workspace::{Item, Pane, Workspace};
 
+mod openui_library;
+mod openui_story;
 mod zed_theme;
+
+use openui::Library;
+use openui_story::OpenUiStory;
 
 actions!(
     storybook,
     [
-        /// Opens the GPUI Kit story of the active `.gpui-story` file.
+        /// Previews the OpenUI story of the active `.gpui-story` file.
         OpenCanvas,
-        /// Opens the GPUI Kit story of the active `.gpui-story` file in a split.
+        /// Previews the OpenUI story of the active `.gpui-story` file in a split.
         OpenCanvasToTheSide
     ]
 );
 
 pub const STORY_EXTENSION: &str = "gpui-story";
 const MAX_STORY_BYTES: usize = 64 * 1024;
-
-#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum Library {
-    #[default]
-    GpuiKit,
-    GpuiAi,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoryFile {
-    #[serde(default)]
-    library: Library,
-    story: String,
-}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -126,7 +114,8 @@ impl gpui::Global for LibrariesInitialized {}
 
 struct StoryCanvas {
     source: Entity<Buffer>,
-    story: Result<(Library, SharedString, Entity<Root>), SharedString>,
+    library: Result<Library, SharedString>,
+    story: Option<(Entity<OpenUiStory>, Entity<Root>)>,
     focus: FocusHandle,
     _edits: Subscription,
 }
@@ -140,7 +129,9 @@ impl StoryCanvas {
         });
         let mut canvas = Self {
             source: source.clone(),
-            story: Err(SharedString::default()),
+            library: openui_library::library()
+                .map_err(|error| format!("Invalid story library: {error}").into()),
+            story: None,
             focus: cx.focus_handle(),
             _edits: edits,
         };
@@ -149,65 +140,27 @@ impl StoryCanvas {
     }
 
     fn load(&mut self, source: &Entity<Buffer>, window: &mut Window, cx: &mut Context<Self>) {
-        let (library, name) = match parse(source.read(cx)) {
-            Ok(file) => (file.library, file.story),
-            Err(error) => {
-                self.story = Err(error);
-                cx.notify();
-                return;
-            }
-        };
-        // Keep the mounted story, and its interaction state, across edits
-        // that do not change which story the file names.
-        if let Ok((current_library, current, _)) = &self.story
-            && *current_library == library
-            && current.eq_ignore_ascii_case(&name)
-        {
+        let Ok(library) = &self.library else {
             return;
-        }
-        self.story = match library {
-            Library::GpuiKit => match gpui_component_story::open_story(&name, window, cx) {
-                Some(container) => {
-                    let root = cx.new(|cx| Root::new(container, window, cx));
-                    Ok((library, name.into(), root))
-                }
-                None => Err(format!(
-                    "Unknown GPUI Kit story {name:?}. Known stories: {}",
-                    gpui_component_story::catalog()
-                        .iter()
-                        .map(|(title, _)| *title)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-                .into()),
-            },
-            Library::GpuiAi => match name.trim().parse::<gpui_ai_gallery::StoryId>() {
-                Ok(id) => {
-                    let gallery = gpui_ai_gallery::embedded_story(id, cx);
-                    let root = cx.new(|cx| Root::new(gallery, window, cx));
-                    Ok((library, id.title().into(), root))
-                }
-                Err(error) => Err(format!(
-                    "{error}. Known gpui-ai stories: {}",
-                    gpui_ai_gallery::StoryId::ALL
-                        .iter()
-                        .map(|id| id.slug())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-                .into()),
-            },
         };
+        let buffer = source.read(cx);
+        let text = if buffer.len() > MAX_STORY_BYTES {
+            "root = Column([Text(\"Story file exceeds 64 KiB\", \"error\")])".to_owned()
+        } else {
+            buffer.text()
+        };
+        match &self.story {
+            Some((story, _)) => {
+                story.update(cx, |story, cx| story.set_source(library, &text, cx));
+            }
+            None => {
+                let story = cx.new(|_| OpenUiStory::new(library, &text));
+                let root = cx.new(|cx| Root::new(story.clone(), window, cx));
+                self.story = Some((story, root));
+            }
+        }
         cx.notify();
     }
-}
-
-fn parse(buffer: &Buffer) -> Result<StoryFile, SharedString> {
-    if buffer.len() > MAX_STORY_BYTES {
-        return Err("Story file exceeds 64 KiB".into());
-    }
-    serde_json::from_str::<StoryFile>(&buffer.text())
-        .map_err(|error| format!("Invalid GPUI story: {error}").into())
 }
 
 impl Render for StoryCanvas {
@@ -216,14 +169,15 @@ impl Render for StoryCanvas {
             .id("gpui-story-canvas")
             .track_focus(&self.focus)
             .size_full();
-        match &self.story {
-            Ok((_, _, root)) => canvas.child(root.clone()),
-            Err(error) => canvas
+        match (&self.library, &self.story) {
+            (Ok(_), Some((_, root))) => canvas.child(root.clone()),
+            (Err(error), _) => canvas
                 .flex()
                 .items_center()
                 .justify_center()
                 .p_4()
                 .child(error.clone()),
+            (Ok(_), None) => canvas,
         }
     }
 }
@@ -240,14 +194,10 @@ impl Item for StoryCanvas {
     type Event = ();
 
     fn tab_content_text(&self, _: usize, cx: &App) -> SharedString {
-        match &self.story {
-            Ok((_, name, _)) => format!("Story: {name}").into(),
-            Err(_) => self
-                .source
-                .read(cx)
-                .file()
-                .map(|file| format!("Story: {}", file.file_name(cx)).into())
-                .unwrap_or_else(|| "GPUI Story".into()),
-        }
+        self.source
+            .read(cx)
+            .file()
+            .map(|file| format!("Story: {}", file.file_name(cx)).into())
+            .unwrap_or_else(|| "GPUI Story".into())
     }
 }

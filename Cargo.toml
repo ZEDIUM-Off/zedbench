@@ -284,6 +284,7 @@ edition = "2024"
 [workspace.dependencies]
 gpui-component-story = { path = "components/gpui-kit/crates/story", default-features = false }
 gpui-kit = { path = "components/gpui-kit/crates/kit" }
+openui = "0.1.0"
 gpui-ai = { path = "components/gpui-ai/crates/gpui-ai" }
 gpui-ai-gallery = { package = "gallery", path = "components/gpui-ai/crates/gallery", default-features = false }
 

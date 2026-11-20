@@ -1,4 +1,2 @@
-{
-  "library": "gpui-ai",
-  "story": "context-meter"
-}
+root = Column([story], {grow: true})
+story = AiStory("context-meter")

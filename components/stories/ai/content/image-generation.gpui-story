@@ -1,4 +1,2 @@
-{
-  "library": "gpui-ai",
-  "story": "image-generation"
-}
+root = Column([story], {grow: true})
+story = AiStory("image-generation")

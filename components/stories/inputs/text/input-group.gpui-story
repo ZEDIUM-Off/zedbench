@@ -1,3 +1,2 @@
-{
-  "story": "Input Group"
-}
+root = Column([story], {grow: true})
+story = KitStory("Input Group")

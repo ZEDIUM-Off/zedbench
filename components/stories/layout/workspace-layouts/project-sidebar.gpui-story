@@ -1,0 +1,68 @@
+# Workspace Layouts: Project Sidebar
+# A sidebar per project, independent of the layouts, with one view per tab:
+# Files, Terminals, Agents, Git, Search and Agentboard.
+
+$project = "zedbench"
+$tab = 1
+$query = ""
+
+projects = [
+  {id: "zedbench", name: "zedbench", root: "/src/zedbench"},
+  {id: "toolbox", name: "toolbox", root: "/src/toolbox"}
+]
+terminals = [
+  {id: "t1", project: "zedbench", name: "Dev server", kind: "terminal", status: "Live", branch: "main", cwd: "crates/zed"},
+  {id: "t2", project: "zedbench", name: "Shell", kind: "terminal", status: "Live", branch: "main", cwd: "."},
+  {id: "t7", project: "zedbench", name: "Reconnect review", kind: "agent", status: "Blocked", branch: "feat/reconnect", cwd: "crates/terminal_view"},
+  {id: "t9", project: "zedbench", name: "Fixture tests", kind: "agent", status: "Working", branch: "feat/layouts", cwd: "crates/workspace"},
+  {id: "t21", project: "toolbox", name: "Toolbox shell", kind: "terminal", status: "Live", branch: "main", cwd: "."},
+  {id: "t22", project: "toolbox", name: "Review tool updates", kind: "agent", status: "Done", branch: "main", cwd: "scripts"}
+]
+files = [
+  {name: "crates", depth: 0, icon: "folder_open"},
+  {name: "story_canvas", depth: 1, icon: "folder_open"},
+  {name: "openui_story.rs", depth: 2, icon: "file_rust"},
+  {name: "story_canvas.rs", depth: 2, icon: "file_rust"},
+  {name: "components", depth: 0, icon: "folder"},
+  {name: "Cargo.toml", depth: 0, icon: "file"}
+]
+changes = [
+  {path: "crates/story_canvas/src/openui_story.rs", state: "A"},
+  {path: "crates/story_canvas/src/story_canvas.rs", state: "M"},
+  {path: "Cargo.toml", state: "M"}
+]
+
+mine = @Filter(terminals, "project", "==", $project)
+shells = @Filter(mine, "kind", "==", "terminal")
+agents = @Filter(mine, "kind", "==", "agent")
+
+root = Row([rail, Divider(), sidebar, Divider(), editor], {grow: true, align: "stretch"})
+
+rail = Column(@Each(projects, "p", Button(p.name, @Set($project, p.id), "ghost", $project == p.id, "folder")), {width: 120, gap: 4, padding: 6, surface: "panel"})
+
+sidebar = Column([
+  Tabs(["Files", "Terminals", "Agents", "Git", "Search", "Agentboard"], $tab),
+  Column([$tab == 0 ? filesView : $tab == 1 ? terminalsView : $tab == 2 ? agentsView : $tab == 3 ? gitView : $tab == 4 ? searchView : boardView], {grow: true, scroll: true, padding: 6})
+], {width: 420, surface: "panel"})
+
+filesView = Column(@Each(files, "f", ListItem(f.name, null, false, f.icon, null, f.depth)))
+terminalsView = Column(@Each(shells, "t", ListItem(t.name, null, false, "terminal", t.branch + " · " + t.cwd, 0, [Tag(t.id, "secondary")])))
+agentsView = Column(@Each(agents, "t", ListItem(t.name, null, false, "zed_agent", t.branch, 0, [Tag(t.status, t.status == "Blocked" ? "danger" : t.status == "Working" ? "warning" : "success")])))
+gitView = Column([
+  Row([Icon("git_branch", "accent"), Text("main"), Spacer(), Text(@Count(changes) + " changes", "small")], {gap: 6}),
+  Column(@Each(changes, "c", ListItem(c.path, null, false, "file", null, 0, [Tag(c.state, c.state == "A" ? "success" : "warning")])))
+], {gap: 6})
+searchView = Column([
+  Input($query, "Search terminals and agents"),
+  Column(@Each(@Filter(mine, "name", "contains", $query), "t", ListItem(t.name, null, false, t.kind == "agent" ? "zed_agent" : "terminal", t.id)))
+], {gap: 6})
+boardView = Row([
+  Column([Text("Blocked", "error"), Column(@Each(@Filter(agents, "status", "==", "Blocked"), "t", Text(t.name)))], {grow: true, gap: 4, padding: 6, border: true, rounded: true}),
+  Column([Text("Working", "warning"), Column(@Each(@Filter(agents, "status", "==", "Working"), "t", Text(t.name)))], {grow: true, gap: 4, padding: 6, border: true, rounded: true}),
+  Column([Text("Done", "success"), Column(@Each(@Filter(agents, "status", "==", "Done"), "t", Text(t.name)))], {grow: true, gap: 4, padding: 6, border: true, rounded: true})
+], {gap: 6, align: "stretch"})
+
+editor = Column([
+  Text("Editor area: the active layout of " + $project, "muted"),
+  Text("The sidebar keeps its tab and project while layouts change.", "small")
+], {grow: true, padding: 12, gap: 6, surface: "editor"})

@@ -1,0 +1,50 @@
+# Workspace Layouts: Search Index
+# One search over every terminal and agent, by name, branch, cwd or Herdr
+# Core address. Search terms are lowercase.
+
+$query = ""
+$selected = "t7"
+
+terminals = [
+  {id: "t1", name: "Dev server", kind: "terminal", status: "Live", worktree: "main", cwd: "/src/zedbench/crates/zed", preview: "$ cargo run -p zed\n   Running target/debug/zed"},
+  {id: "t2", name: "Shell", kind: "terminal", status: "Live", worktree: "main", cwd: "/src/zedbench", preview: "$ git status --short\n M crates/workspace/src/workspace.rs"},
+  {id: "t7", name: "Reconnect review", kind: "agent", agent: "Pi", status: "Blocked", worktree: "hc", cwd: "/src/zedbench-hc/crates/terminal_view", preview: "Pi · Reconnect review\n\nWhich restore path should keep the terminal reference?"},
+  {id: "t12", name: "Logs", kind: "terminal", status: "Live", worktree: "hc", cwd: "/tmp/zedbench-logs", preview: "$ tail -f core.log\n INFO reconnect finished"},
+  {id: "t9", name: "Fixture tests", kind: "agent", agent: "Codex", status: "Working", worktree: "layouts", cwd: "/src/zedbench-layouts/crates/workspace", preview: "Codex · Fixture tests\n\nChecking saved split trees…"},
+  {id: "t13", name: "Layout review", kind: "agent", agent: "Pi", status: "Done", worktree: "layouts", cwd: "/src/zedbench-layouts", preview: "Review complete. Ready for the next prompt."},
+  {id: "buildbox/t3", name: "Renderer benchmark", kind: "terminal", status: "Offline", worktree: "remote", cwd: "/srv/zedbench-render", preview: "Machine offline. Showing the last known directory."}
+]
+
+branches = {main: "main", hc: "feat/reconnect", layouts: "feat/layouts", remote: "buildbox · perf/rendering"}
+index = [
+  {id: "t1", text: "dev server t1 main /src/zedbench/crates/zed terminal"},
+  {id: "t2", text: "shell t2 main /src/zedbench terminal"},
+  {id: "t7", text: "reconnect review t7 feat/reconnect /src/zedbench-hc pi agent blocked"},
+  {id: "t12", text: "logs t12 feat/reconnect /tmp/zedbench-logs terminal"},
+  {id: "t9", text: "fixture tests t9 feat/layouts /src/zedbench-layouts codex agent working"},
+  {id: "t13", text: "layout review t13 feat/layouts /src/zedbench-layouts pi agent done"},
+  {id: "buildbox/t3", text: "renderer benchmark buildbox/t3 perf/rendering /srv/zedbench-render offline"}
+]
+hits = @Filter(index, "text", "contains", $query)
+current = @First(@Filter(terminals, "id", "==", $selected))
+
+root = Column([
+  Row([Icon("magnifying_glass", "muted"), Column([Input($query, "Name, branch, cwd or terminal ID")], {grow: true}), Text(@Count(hits) + " of " + @Count(index), "small")], {gap: 8, padding: 8}),
+  Divider(),
+  Row([results, Divider(), preview], {grow: true, align: "stretch"})
+], {grow: true})
+
+results = Column(@Each(hits, "h", ListItem(
+  @First(@Filter(terminals, "id", "==", h.id)).name,
+  @Set($selected, h.id),
+  $selected == h.id,
+  @First(@Filter(terminals, "id", "==", h.id)).kind == "agent" ? "zed_agent" : "terminal",
+  @First(@Filter(terminals, "id", "==", h.id)).cwd
+)), {width: 360, scroll: true, padding: 4, surface: "panel"})
+
+preview = Column([
+  Row([Text(current.name, "heading"), Tag(current.status), Spacer(), Tag(current.id, "secondary")], {gap: 6}),
+  Text(current.cwd, "code"),
+  Code(current.preview),
+  Row([Button("Show in layout", @ToAssistant("Reveal " + current.id + " in the active layout"), "primary"), Button("Open in new split", @ToAssistant("Split with " + current.id), "ghost")], {gap: 6})
+], {grow: true, gap: 8, padding: 12})

@@ -1,3 +1,2 @@
-{
-  "story": "Sheet"
-}
+root = Column([story], {grow: true})
+story = KitStory("Sheet")

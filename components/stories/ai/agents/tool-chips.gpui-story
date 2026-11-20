@@ -1,4 +1,2 @@
-{
-  "library": "gpui-ai",
-  "story": "tool-chips"
-}
+root = Column([story], {grow: true})
+story = AiStory("tool-chips")

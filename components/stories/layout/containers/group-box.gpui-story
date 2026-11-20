@@ -1,3 +1,2 @@
-{
-  "story": "GroupBox"
-}
+root = Column([story], {grow: true})
+story = KitStory("GroupBox")

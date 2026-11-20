@@ -1,0 +1,60 @@
+# Workspace Layouts: Worktree Tree
+# Terminals and agents grouped by worktree, independent of the layout that
+# shows them. Click a terminal to inspect it, pick a layout above the panes.
+
+$selected = "t7"
+$layout = 0
+
+worktrees = [
+  {id: "main", branch: "main", root: "/src/zedbench"},
+  {id: "hc", branch: "feat/reconnect", root: "/src/zedbench-hc"},
+  {id: "layouts", branch: "feat/layouts", root: "/src/zedbench-layouts"},
+  {id: "remote", branch: "buildbox · perf/rendering", root: "/srv/zedbench-render"}
+]
+
+terminals = [
+  {id: "t1", name: "Dev server", kind: "terminal", status: "Live", worktree: "main", cwd: "/src/zedbench/crates/zed", preview: "$ cargo run -p zed\n   Running target/debug/zed"},
+  {id: "t2", name: "Shell", kind: "terminal", status: "Live", worktree: "main", cwd: "/src/zedbench", preview: "$ git status --short\n M crates/workspace/src/workspace.rs"},
+  {id: "t7", name: "Reconnect review", kind: "agent", agent: "Pi", status: "Blocked", worktree: "hc", cwd: "/src/zedbench-hc/crates/terminal_view", preview: "Pi · Reconnect review\n\nWhich restore path should keep the terminal reference?"},
+  {id: "t12", name: "Logs", kind: "terminal", status: "Live", worktree: "hc", cwd: "/tmp/zedbench-logs", preview: "$ tail -f core.log\n INFO reconnect finished"},
+  {id: "t9", name: "Fixture tests", kind: "agent", agent: "Codex", status: "Working", worktree: "layouts", cwd: "/src/zedbench-layouts/crates/workspace", preview: "Codex · Fixture tests\n\nChecking saved split trees…"},
+  {id: "t13", name: "Layout review", kind: "agent", agent: "Pi", status: "Done", worktree: "layouts", cwd: "/src/zedbench-layouts", preview: "Review complete. Ready for the next prompt."},
+  {id: "buildbox/t3", name: "Renderer benchmark", kind: "terminal", status: "Offline", worktree: "remote", cwd: "/srv/zedbench-render", preview: "Machine offline. Showing the last known directory."}
+]
+
+layouts = [
+  {name: "Dev", panes: ["t1", "t2"]},
+  {name: "Review", panes: ["t7", "t12"]},
+  {name: "Agents", panes: ["t7", "t9", "t13"]}
+]
+
+root = Row([sidebar, Divider(), main], {grow: true, align: "stretch"})
+
+sidebar = Column([
+  Row([Icon("list_tree", "muted"), Text("Worktrees", "heading")], {gap: 6, padding: 8}),
+  Column(@Each(worktrees, "w", Column([
+    ListItem(w.branch, null, false, "git_branch", w.root),
+    Column(@Each(@Filter(terminals, "worktree", "==", w.id), "t",
+      ListItem(t.name, @Set($selected, t.id), $selected == t.id, t.kind == "agent" ? "zed_agent" : "terminal", t.id, 1, [Tag(t.status, t.status == "Blocked" ? "danger" : t.status == "Working" ? "warning" : t.status == "Offline" ? "secondary" : "success")])
+    ))
+  ])), {gap: 4, scroll: true, grow: true})
+], {width: 300, surface: "panel"})
+
+current = @First(@Filter(terminals, "id", "==", $selected))
+active = layouts[$layout]
+
+main = Column([
+  Row([Text("Layout", "muted"), Tabs(@Each(layouts, "l", l.name), $layout), Spacer(), Text(@Count(active.panes) + " panes", "small")], {gap: 8, padding: 8}),
+  Divider(),
+  Row(@Each(active.panes, "id", Column([
+    Row([Icon("terminal", "muted"), Text(@First(@Filter(terminals, "id", "==", id)).name), Spacer(), Text(id, "small")], {gap: 6}),
+    Code(@First(@Filter(terminals, "id", "==", id)).preview)
+  ], {grow: true, gap: 6, padding: 8, border: true, rounded: true, surface: "editor"})), {gap: 8, padding: 8, grow: true, align: "stretch"}),
+  Divider(),
+  details
+], {grow: true})
+
+details = Column([
+  Row([Icon(current.kind == "agent" ? "zed_agent" : "terminal"), Text(current.name, "heading"), Tag(current.id, "secondary"), Spacer(), Text(current.cwd, "code")], {gap: 6}),
+  Code(current.preview)
+], {gap: 6, padding: 8, surface: "elevated"})

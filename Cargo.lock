@@ -14155,6 +14155,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openui"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff1df8b1ba24776357d96cccd6cc1092216dd3e25b8d230254d550d232c7d288"
+dependencies = [
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "optfield"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19717,14 +19726,16 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "story_canvas"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gallery",
  "gpui",
  "gpui-component-story",
  "gpui-kit",
+ "icons",
  "language",
  "log",
  "multi_buffer",
- "serde",
+ "openui",
  "serde_json",
  "settings",
  "theme",

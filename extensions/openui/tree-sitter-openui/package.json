@@ -1,0 +1,13 @@
+{
+  "name": "tree-sitter-openui",
+  "version": "0.1.0",
+  "description": "OpenUI Lang grammar for tree-sitter",
+  "license": "Apache-2.0",
+  "main": "grammar.js",
+  "tree-sitter": [
+    {
+      "scope": "source.openui",
+      "file-types": ["gpui-story", "openui"]
+    }
+  ]
+}

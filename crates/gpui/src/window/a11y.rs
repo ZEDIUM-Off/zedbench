@@ -145,6 +145,14 @@ pub(crate) struct A11y {
     /// At the end of the frame, we re-call [`Self::sync_active_flag`] to
     /// determine whether we should actually send the finished [`TreeUpdate`].
     active_this_frame: bool,
+    /// Whether a tool inspecting the window asked for the tree, independently
+    /// of assistive technology and even when accessibility is [forcibly
+    /// disabled]. The tree is then built for
+    /// [`Self::debug_tree_json`] but not sent to the platform adapter, which
+    /// has not asked for it.
+    ///
+    /// [forcibly disabled]: crate::Application::new_inaccessible
+    inspection_requested: bool,
     pub(crate) nodes: A11yNodeBuilder,
     pub(crate) focus_ids: FxHashMap<NodeId, FocusId>,
     pub(crate) node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
@@ -173,6 +181,7 @@ impl A11y {
             force_disabled,
             active_flag,
             active_this_frame: false,
+            inspection_requested: false,
             nodes: A11yNodeBuilder::new(),
             focus_ids: FxHashMap::default(),
             node_bounds: FxHashMap::default(),
@@ -210,7 +219,18 @@ impl A11y {
     /// See the docs for [`Self::active_flag`] and [`Self::active_this_frame`]
     /// for more commentary.
     pub(crate) fn sync_active_flag(&mut self) {
-        self.active_this_frame = self.is_enabled() && self.active_flag.load(Ordering::SeqCst);
+        // Inspection never reaches the platform adapter, so it works even when
+        // accessibility is forcibly disabled.
+        self.active_this_frame = self.inspection_requested || self.is_platform_active();
+    }
+
+    /// Whether assistive technology asked for tree updates.
+    pub(crate) fn is_platform_active(&self) -> bool {
+        self.is_enabled() && self.active_flag.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_inspection_requested(&mut self, requested: bool) {
+        self.inspection_requested = requested;
     }
 
     pub(crate) fn is_enabled(&self) -> bool {

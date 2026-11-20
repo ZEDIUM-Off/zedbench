@@ -4009,7 +4009,9 @@ impl Window {
         self.a11y.sync_active_flag();
         let a11y_active_end_of_frame = self.a11y.is_active();
 
-        let should_send_a11y_update = a11y_active_start_of_frame && a11y_active_end_of_frame;
+        let should_send_a11y_update = a11y_active_start_of_frame
+            && a11y_active_end_of_frame
+            && self.a11y.is_platform_active();
 
         if a11y_active_start_of_frame {
             // Harvest frame metadata for the debug dump while the live window
@@ -7301,6 +7303,15 @@ impl Window {
         self.a11y.is_active()
     }
 
+    /// Builds the accessibility tree on every frame even when no assistive
+    /// technology is connected, so that [`Self::debug_a11y_tree_json`] can
+    /// describe the window to a tool inspecting it. The tree is only sent to the
+    /// platform when assistive technology asks for it.
+    pub fn set_a11y_inspection(&mut self, requested: bool) {
+        self.a11y.set_inspection_requested(requested);
+        self.refresh();
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()
@@ -7322,6 +7333,13 @@ impl Window {
             .entry(node_id)
             .or_default()
             .push((action, Box::new(listener)));
+    }
+
+    /// Performs an accessibility action on a node of the last frame's tree, as
+    /// assistive technology would.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn perform_a11y_action(&mut self, request: accesskit::ActionRequest, cx: &mut App) {
+        self.handle_a11y_action(request, cx);
     }
 
     #[cfg(not(target_family = "wasm"))]

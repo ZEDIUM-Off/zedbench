@@ -230,7 +230,8 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "off.zedium.Zedbench",
             ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
             ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            // Zed's id would make desktops show Zedbench's windows as upstream Zed.
+            ReleaseChannel::Stable => "off.zedium.Zedbench",
         }
     }
 

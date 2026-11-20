@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Build Zedbench for Linux and package it for the private release feed.
+#
+# Usage: script/zedbench/bundle-linux VERSION
+# Writes $CARGO_TARGET_DIR/zedium-VERSION-linux-ARCH.tar.gz, holding
+# zedbench.app/ in the layout the auto-updater installs into ~/.local.
+set -euo pipefail
+
+version=${1:?usage: bundle-linux VERSION}
+[[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+    echo "invalid version $version" >&2
+    exit 2
+}
+cd "$(dirname "$0")/../.."
+target_dir=${CARGO_TARGET_DIR:-target}
+arch=$(uname -m)
+
+export ZEDIUM_PRIVATE_VERSION=$version
+# The CLI reports this as its version.
+export RELEASE_VERSION=$version
+export ZEDIUM_PRIVATE_UPDATE_ORIGIN=${ZEDIUM_PRIVATE_UPDATE_ORIGIN:-https://dgx-spark.tailc000c6.ts.net:18443}
+export CARGO_PROFILE_RELEASE_FAST_DEBUG=0
+cargo build --locked --profile release-fast ${CARGO_JOBS:+-j "$CARGO_JOBS"} -p zed -p cli
+
+staging=$(mktemp -d)
+trap 'rm -rf "$staging"' EXIT
+app="$staging/zedbench.app"
+mkdir -p "$app/bin" "$app/libexec" "$app/share/applications" "$app/share/icons/hicolor/512x512/apps"
+cp "$target_dir/release-fast/cli" "$app/bin/zedbench"
+# The CLI finds the app at ../libexec/zed-editor, and the auto-updater
+# recognizes its install folder from that path.
+cp "$target_dir/release-fast/zedbench" "$app/libexec/zed-editor"
+cp crates/zed/resources/app-icon.png "$app/share/icons/hicolor/512x512/apps/zedbench.png"
+cp assets/licenses.md "$app/licenses.md" 2>/dev/null || true
+
+# Exec and Icon are relative here; install-linux makes them absolute.
+cat > "$app/share/applications/off.zedium.Zedbench.desktop" <<'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Zedbench
+GenericName=Text Editor
+Comment=Zed fork for building GPUI software.
+TryExec=zedbench
+StartupNotify=true
+StartupWMClass=off.zedium.Zedbench
+Exec=zedbench %U
+Icon=zedbench
+Categories=Utility;TextEditor;Development;IDE;
+Keywords=zed;zedbench;editor;
+MimeType=text/plain;application/x-zerosize;
+Actions=NewWorkspace;
+
+[Desktop Action NewWorkspace]
+Exec=zedbench --new %U
+Name=Open a new workspace
+EOF
+
+archive="$target_dir/zedium-$version-linux-$arch.tar.gz"
+tar -czf "$archive" -C "$staging" zedbench.app
+sha256sum "$archive"

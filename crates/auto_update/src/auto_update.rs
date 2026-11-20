@@ -21,7 +21,7 @@ use std::mem;
 use std::{
     env::{
         self,
-        consts::OS,
+        consts::{ARCH, OS},
     },
     ffi::OsStr,
     ffi::OsString,
@@ -44,11 +44,19 @@ impl std::fmt::Display for MissingDependencyError {
 }
 
 impl std::error::Error for MissingDependencyError {}
-const PRIVATE_WINDOWS_FEED: Option<&str> = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+/// Zedbench's own release feed, set at build time. Without it, Zedbench never
+/// updates, since Zed's releases would replace it with upstream Zed.
+const PRIVATE_FEED: Option<&str> = if cfg!(any(target_os = "windows", target_os = "linux")) {
     option_env!("ZEDIUM_PRIVATE_UPDATE_ORIGIN")
 } else {
     None
 };
+
+/// The file the private feed serves for this platform's releases.
+fn private_release_file_name(version: &Version) -> String {
+    let extension = if OS == "windows" { "exe" } else { "tar.gz" };
+    format!("zedium-{version}-{OS}-{ARCH}.{extension}")
+}
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -285,9 +293,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
         let updater = AutoUpdater::new(version, client, cx);
 
         let poll_for_updates = ReleaseChannel::try_global(cx)
-            // Zedbench only updates from its private feed: Zed's own releases would
-            // replace it with upstream Zed.
-            .map(|_| PRIVATE_WINDOWS_FEED.is_some())
+            .map(|_| PRIVATE_FEED.is_some())
             .unwrap_or(false);
 
         if option_env!("ZED_UPDATE_EXPLANATION").is_none()
@@ -331,9 +337,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 
     if !ReleaseChannel::try_global(cx)
-        // Zedbench only updates from its private feed: Zed's own releases would
-            // replace it with upstream Zed.
-            .map(|_| PRIVATE_WINDOWS_FEED.is_some())
+        .map(|_| PRIVATE_FEED.is_some())
         .unwrap_or(false)
     {
         return;
@@ -766,10 +770,10 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data = if let Some(origin) = PRIVATE_WINDOWS_FEED {
+        let fetched_release_data = if let Some(origin) = PRIVATE_FEED {
             let origin = http_client::Url::parse(origin)?;
             anyhow::ensure!(origin.scheme() == "https" && origin.host_str().is_some(), "private updates require HTTPS");
-            let url = origin.join("/windows/x86_64/latest")?;
+            let url = origin.join(&format!("/{OS}/{ARCH}/latest"))?;
             let mut response = client.get(url.as_str(), Default::default(), false).await?;
             anyhow::ensure!(response.status().is_success(), "private feed returned {}", response.status());
             let mut body = Vec::new();
@@ -777,7 +781,7 @@ impl AutoUpdater {
             anyhow::ensure!(body.len() <= 4096, "private release metadata is too large");
             let release: ReleaseAsset = serde_json::from_slice(&body)?;
             let version = Version::parse(&release.version)?;
-            let expected = origin.join(&format!("/zedium-{version}-windows-x86_64.exe"))?;
+            let expected = origin.join(&format!("/{}", private_release_file_name(&version)))?;
             anyhow::ensure!(release.url == expected.as_str(), "unexpected private installer URL");
             release
         } else {
@@ -1106,7 +1110,7 @@ async fn download_release(
 ) -> Result<()> {
     let mut target_file = File::create(&target_path).await?;
 
-    let mut response = client.get(&release.url, Default::default(), PRIVATE_WINDOWS_FEED.is_none()).await?;
+    let mut response = client.get(&release.url, Default::default(), PRIVATE_FEED.is_none()).await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to download update: {:?}",
@@ -1187,7 +1191,8 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("zed{}.app", suffix);
+    // Not `zed.app`, where upstream Zed installs itself.
+    let app_folder_name = format!("zedbench{}.app", suffix);
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");

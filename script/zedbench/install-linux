@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Install a Zedbench Linux archive into ~/.local and register it with the
+# desktop launcher. Later versions arrive through the auto-updater.
+#
+# Usage: script/zedbench/install-linux zedium-VERSION-linux-ARCH.tar.gz
+set -euo pipefail
+
+archive=${1:?usage: install-linux ARCHIVE}
+prefix="$HOME/.local"
+app="$prefix/zedbench.app"
+
+staging=$(mktemp -d)
+trap 'rm -rf "$staging"' EXIT
+tar -xzf "$archive" -C "$staging"
+test -x "$staging/zedbench.app/libexec/zed-editor"
+rsync -a --delete "$staging/zedbench.app/" "$app/"
+
+mkdir -p "$prefix/bin" "$prefix/share/applications"
+ln -sf "$app/bin/zedbench" "$prefix/bin/zedbench"
+desktop="$prefix/share/applications/off.zedium.Zedbench.desktop"
+sed -e "s|^TryExec=zedbench|TryExec=$app/bin/zedbench|" \
+    -e "s|^Exec=zedbench|Exec=$app/bin/zedbench|" \
+    -e "s|^Icon=zedbench|Icon=$app/share/icons/hicolor/512x512/apps/zedbench.png|" \
+    "$app/share/applications/off.zedium.Zedbench.desktop" > "$desktop"
+if command -v update-desktop-database >/dev/null; then
+    update-desktop-database "$prefix/share/applications" || true
+fi
+echo "installed $("$app/bin/zedbench" --version 2>/dev/null || echo zedbench) in $app"

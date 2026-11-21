@@ -31,7 +31,8 @@ usage: zedbench --agent [-w WINDOW] COMMAND
   snapshot [-i]           the window as an accessibility tree; -i keeps interactive nodes
   click REF               click a node from the last snapshot, such as `e12`
   focus REF               focus a node from the last snapshot
-  hover REF               move the pointer over a node from the last snapshot";
+  hover REF               move the pointer over a node from the last snapshot
+  menu REF                open the context menu of a node from the last snapshot";
 
 struct AgentSession {
     started: Instant,
@@ -104,6 +105,7 @@ pub fn run(args: Vec<String>, cx: &mut App) -> Result<String> {
         "click" => perform(rest.first(), accesskit::Action::Click, cx),
         "focus" => perform(rest.first(), accesskit::Action::Focus, cx),
         "hover" => perform(rest.first(), accesskit::Action::ShowTooltip, cx),
+        "menu" => perform(rest.first(), accesskit::Action::ShowContextMenu, cx),
         _ => Err(anyhow!("unknown command {command:?}\n{USAGE}")),
     }
 }

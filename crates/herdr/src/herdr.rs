@@ -14,6 +14,20 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use util::ResultExt as _;
 
+gpui::actions!(
+    herdr,
+    [
+        /// Starts a shell in Herdr Core, in the scope of the layout on
+        /// screen, and opens its tab.
+        #[action(deprecated_aliases = ["layouts_panel::NewHerdrTerminal"])]
+        NewTerminal,
+        /// Opens a table of the programs that Herdr Core runs, limited to
+        /// the scope of the layout on screen.
+        #[action(deprecated_aliases = ["layouts_panel::OpenProcesses"])]
+        OpenPrograms,
+    ]
+);
+
 pub use connection::{Connection, RpcError, Stream, StreamEvent, StreamHandle};
 
 const FIRST_RECONNECT_DELAY: Duration = Duration::from_secs(2);

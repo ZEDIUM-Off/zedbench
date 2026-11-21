@@ -51,19 +51,12 @@ actions!(
         NextLayout,
         /// Shows the previous layout of the window.
         PreviousLayout,
-        /// Starts a shell in Herdr Core, in the folder of the project, and
-        /// opens its tab.
-        NewHerdrTerminal,
-        /// Opens a table of every program that Herdr Core runs, limited to
-        /// the scope of the layout on screen.
-        OpenProcesses,
-        /// Adds a group of layouts for each workspace where Herdr Core runs
-        /// programs: an overview, and a layout per worktree.
-        LayoutsFromRunningProjects,
     ]
 );
 
 const PANEL_KEY: &str = "LayoutsPanel";
+const OVERVIEW: &str = "Overview";
+const PLACING_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
 const DEFAULT_WIDTH: Pixels = px(248.);
 const NARROW_WIDTH: Pixels = px(44.);
 /// Under this width the panel shows icons only.
@@ -93,14 +86,11 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &PreviousLayout, window, cx| {
             workspace.activate_adjacent_layout(false, window, cx);
         });
-        workspace.register_action(|workspace, _: &NewHerdrTerminal, window, cx| {
+        workspace.register_action(|workspace, _: &herdr::NewTerminal, window, cx| {
             new_herdr_terminal(workspace, window, cx);
         });
-        workspace.register_action(|workspace, _: &OpenProcesses, window, cx| {
+        workspace.register_action(|workspace, _: &herdr::OpenPrograms, window, cx| {
             open_processes(workspace, window, cx);
-        });
-        workspace.register_action(|workspace, _: &LayoutsFromRunningProjects, window, cx| {
-            layouts_from_running_projects(workspace, window, cx);
         });
     })
     .detach();
@@ -184,6 +174,11 @@ struct LayoutSummary {
 }
 
 impl LayoutSummary {
+    /// The machine of its scope: `None` for a global layout.
+    fn machine(&self) -> Option<Option<String>> {
+        self.scope.as_ref().map(|scope| scope.machine.clone())
+    }
+
     fn icon(&self) -> IconName {
         if self.agents > 0 {
             IconName::ZedAgent
@@ -257,6 +252,10 @@ pub struct LayoutsPanel {
     error: Option<SharedString>,
     /// The layouts that other workspaces saved, to open them from here.
     saved_elsewhere: Vec<SavedWorkspaceLayouts>,
+    /// The Herdr programs the window has had a tab for, by address and
+    /// start. `None` until read from the database.
+    placed: Option<HashSet<(String, u64)>>,
+    placing: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -267,16 +266,36 @@ impl LayoutsPanel {
     ) -> Result<Entity<Self>> {
         let kvp = cx.update(|_, cx| KeyValueStore::global(cx))?;
         let serialized = cx
-            .background_spawn(async move { kvp.read_kvp(PANEL_KEY) })
+            .background_spawn({
+                let kvp = kvp.clone();
+                async move { kvp.read_kvp(PANEL_KEY) }
+            })
             .await
             .log_err()
             .flatten()
             .and_then(|json| serde_json::from_str::<SerializedLayoutsPanel>(&json).log_err())
             .unwrap_or_default();
-        workspace.update_in(&mut cx, |workspace, _, cx| {
+        let placed_key =
+            workspace.read_with(&cx, |workspace, _| workspace.database_id().map(placed_key))?;
+        let placed = match placed_key {
+            Some(key) => cx
+                .background_spawn(async move { kvp.read_kvp(&key) })
+                .await
+                .log_err()
+                .flatten()
+                .and_then(|json| serde_json::from_str::<Vec<(String, u64)>>(&json).log_err())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
             let workspace_entity = cx.entity();
             let project = workspace.project().clone();
-            cx.new(|cx| Self::new(workspace_entity, project, serialized, cx))
+            let panel = cx.new(|cx| Self::new(workspace_entity, project, serialized, window, cx));
+            panel.update(cx, |panel, cx| {
+                panel.placed = Some(placed.into_iter().collect());
+                panel.schedule_placing(window, cx);
+            });
+            panel
         })
     }
 
@@ -284,6 +303,7 @@ impl LayoutsPanel {
         workspace: Entity<Workspace>,
         project: Entity<Project>,
         serialized: SerializedLayoutsPanel,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let store = HerdrStore::global(cx);
@@ -298,8 +318,13 @@ impl LayoutsPanel {
         .detach_and_log_err(cx);
         Self {
             saved_elsewhere: Vec::new(),
+            placed: None,
+            placing: None,
             _subscriptions: vec![
-                cx.observe(&store, |_, _, cx| cx.notify()),
+                cx.observe_in(&store, window, |this, _, window, cx| {
+                    this.schedule_placing(window, cx);
+                    cx.notify();
+                }),
                 cx.subscribe(&workspace, |_, _, _: &workspace::Event, cx| cx.notify()),
             ],
             workspace: workspace.downgrade(),
@@ -317,6 +342,116 @@ impl LayoutsPanel {
             editing: None,
             error: None,
         }
+    }
+
+    /// Places the new programs of Herdr Core a moment after they start: a
+    /// terminal the window started gets its tab first, where it asked.
+    fn schedule_placing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.placing.is_some() || self.placed.is_none() {
+            return;
+        }
+        self.placing = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(PLACING_DELAY).await;
+            this.update_in(cx, |this, window, cx| {
+                this.placing = None;
+                this.place_new_programs(window, cx);
+            })
+            .log_err();
+        }));
+    }
+
+    /// Gives each live program of Herdr Core that the window never had a
+    /// tab for a tab in the layout of its place, which it adds when missing.
+    /// A program is placed once: closing its tab keeps it out.
+    fn place_new_programs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let roots = self.place_roots(cx);
+        let shown = shown_herdr_addresses(workspace.read(cx), cx);
+        let store = self.store.read(cx);
+        if !store.is_connected() {
+            return;
+        }
+        let Some(placed) = self.placed.as_mut() else {
+            return;
+        };
+        let known = store
+            .terminals()
+            .into_iter()
+            .map(|record| (record.address.clone(), record.created_ms))
+            .collect::<HashSet<_>>();
+        let before = placed.len();
+        placed.retain(|key| known.contains(key));
+        let mut changed = placed.len() != before;
+        let mut new = Vec::new();
+        for record in store.terminals() {
+            if !record.is_live() {
+                continue;
+            }
+            if placed.insert((record.address.clone(), record.created_ms)) {
+                changed = true;
+                if !shown.contains(record.address.as_str()) {
+                    let place = place_of(record.machine(), record.current_folder(), &roots);
+                    if !place.workspace.is_empty() {
+                        new.push((record.address.clone(), place));
+                    }
+                }
+            }
+        }
+        if changed {
+            self.save_placed(cx);
+        }
+        if !new.is_empty() {
+            self.update_workspace(window, cx, move |workspace, window, cx| {
+                place_programs(workspace, new, window, cx);
+            });
+        }
+    }
+
+    fn save_placed(&self, cx: &mut Context<Self>) {
+        let Some(placed) = &self.placed else {
+            return;
+        };
+        let Some(key) = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).database_id())
+            .map(placed_key)
+        else {
+            return;
+        };
+        let placed = placed.iter().cloned().collect::<Vec<_>>();
+        let kvp = KeyValueStore::global(cx);
+        cx.background_spawn(async move {
+            let json = serde_json::to_string(&placed)?;
+            kvp.write_kvp(key, json).await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// The folders that hold workspaces: those of the project and of the
+    /// other workspaces of Zed. A home folder holds none, or every program
+    /// would land in it.
+    fn place_roots(&self, cx: &App) -> Vec<(Option<String>, String)> {
+        let store = self.store.read(cx);
+        let mut roots = project_roots(&self.project, &self.store, cx);
+        for saved in &self.saved_elsewhere {
+            let machine = match &saved.remote {
+                Some(remote) => match remote_machine(remote, store) {
+                    Some(machine) => machine,
+                    None => continue,
+                },
+                None => None,
+            };
+            for path in saved.paths.paths() {
+                let root = (machine.clone(), path.to_string_lossy().into_owned());
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+        }
+        roots
     }
 
     fn serialize(&self, cx: &mut Context<Self>) {
@@ -722,7 +857,9 @@ impl LayoutsPanel {
                     .aria_label("Herdr Programs")
                     .icon_size(IconSize::Small)
                     .shape(IconButtonShape::Square)
-                    .tooltip(|_, cx| Tooltip::for_action("Herdr Programs", &OpenProcesses, cx))
+                    .tooltip(|_, cx| {
+                        Tooltip::for_action("Herdr Programs", &herdr::OpenPrograms, cx)
+                    })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.update_workspace(window, cx, |workspace, window, cx| {
                             open_processes(workspace, window, cx);
@@ -1267,12 +1404,43 @@ impl LayoutsPanel {
                 list = list.children(self.render_terminals_of(layout, narrow, cx));
             }
         }
-        for (group_index, group) in groups.iter().enumerate() {
+        // Groups sit under the machine of their scope, so that two
+        // workspaces of the same name on two machines stay apart.
+        let mut sections = Vec::<(Option<Option<String>>, SharedString)>::new();
+        for layout in layouts {
+            let section = (layout.machine(), layout.group.clone());
+            if !layout.group.is_empty() && !sections.contains(&section) {
+                sections.push(section);
+            }
+        }
+        sections.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut current_machine = None;
+        let mut machine_is_folded = false;
+        for (group_index, (machine, group)) in sections.iter().enumerate() {
+            if current_machine.as_ref() != Some(machine) {
+                current_machine = Some(machine.clone());
+                machine_is_folded = false;
+                if let Some(machine) = machine {
+                    let key = format!("machine:{}", machine.as_deref().unwrap_or(""));
+                    machine_is_folded = self.folded_nodes.contains(&key);
+                    if !narrow {
+                        list = list.child(self.render_machine_header(
+                            &key,
+                            machine.as_deref(),
+                            machine_is_folded,
+                            cx,
+                        ));
+                    }
+                }
+            }
+            if machine_is_folded {
+                continue;
+            }
             let is_folded = self.folded_groups.contains(group);
             let members = layouts
                 .iter()
                 .enumerate()
-                .filter(|(_, layout)| layout.group == *group)
+                .filter(|(_, layout)| layout.group == *group && layout.machine() == *machine)
                 .collect::<Vec<_>>();
             let blocked = members
                 .iter()
@@ -1342,6 +1510,53 @@ impl LayoutsPanel {
             }
         }
         list.into_any_element()
+    }
+
+    fn render_machine_header(
+        &self,
+        key: &str,
+        machine: Option<&str>,
+        is_folded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name: SharedString = machine.unwrap_or("This machine").to_string().into();
+        h_flex()
+            .id(SharedString::from(key.to_string()))
+            .role(Role::Button)
+            .aria_label(format!("Machine {name}"))
+            .aria_expanded(!is_folded)
+            .w_full()
+            .mt_1p5()
+            .gap_1()
+            .px_1p5()
+            .rounded_sm()
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+            .child(
+                Icon::new(if is_folded {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(
+                Icon::new(IconName::Server)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(name)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .on_click(cx.listener({
+                let key = key.to_string();
+                move |this, _, _, cx| this.toggle_node(&key, cx)
+            }))
+            .into_any_element()
     }
 
     fn render_terminals_of(
@@ -1692,46 +1907,16 @@ impl LayoutsPanel {
     }
 
     fn render_new_layout_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let panel = cx.entity().downgrade();
-        PopoverMenu::new("layouts-new-menu")
-            .trigger_with_tooltip(
-                IconButton::new("layouts-new", IconName::Plus)
-                    .aria_label("New Layout")
-                    .icon_size(IconSize::Small)
-                    .shape(IconButtonShape::Square),
-                Tooltip::text("New Layout"),
-            )
-            .anchor(Anchor::TopRight)
-            .menu(move |window, cx| {
-                let panel = panel.clone();
-                Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                    menu.entry("Empty Layout", Some(Box::new(NewLayout)), {
-                        let panel = panel.clone();
-                        move |window, cx| {
-                            panel
-                                .update(cx, |this, cx| {
-                                    this.update_workspace(window, cx, |workspace, window, cx| {
-                                        new_layout(workspace, window, cx);
-                                    });
-                                })
-                                .log_err();
-                        }
-                    })
-                    .entry(
-                        "Layouts for Running Projects",
-                        Some(Box::new(LayoutsFromRunningProjects)),
-                        move |window, cx| {
-                            panel
-                                .update(cx, |this, cx| {
-                                    this.update_workspace(window, cx, |workspace, window, cx| {
-                                        layouts_from_running_projects(workspace, window, cx);
-                                    });
-                                })
-                                .log_err();
-                        },
-                    )
-                }))
-            })
+        IconButton::new("layouts-new", IconName::Plus)
+            .aria_label("New Layout")
+            .icon_size(IconSize::Small)
+            .shape(IconButtonShape::Square)
+            .tooltip(|_, cx| Tooltip::for_action("New Layout", &NewLayout, cx))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.update_workspace(window, cx, |workspace, window, cx| {
+                    new_layout(workspace, window, cx);
+                });
+            }))
             .into_any_element()
     }
 
@@ -2013,9 +2198,14 @@ fn terminal_row(record: &TerminalRecord, is_live: bool) -> TerminalRow {
 /// named as the SSH host of a remote one. A remote project that no machine
 /// of the core reaches has no place in Herdr.
 fn project_machine(project: &Project, store: &HerdrStore, cx: &App) -> Option<Option<String>> {
-    let Some(options) = project.remote_connection_options(cx) else {
-        return Some(None);
-    };
+    match project.remote_connection_options(cx) {
+        Some(options) => remote_machine(&options, store),
+        None => Some(None),
+    }
+}
+
+/// The Herdr machine that an SSH connection reaches, by its host name.
+fn remote_machine(options: &RemoteConnectionOptions, store: &HerdrStore) -> Option<Option<String>> {
     let RemoteConnectionOptions::Ssh(options) = options else {
         return None;
     };
@@ -2219,87 +2409,100 @@ fn add_process_table(
     workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
 }
 
-/// Adds a view of a terminal to the pane on screen, even when another
-/// layout shows it already.
-fn add_herdr_view(
-    workspace: &mut Workspace,
-    address: &str,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let weak_workspace = cx.entity().downgrade();
-    let workspace_id = workspace.database_id();
-    let project = workspace.project().downgrade();
-    let address = SharedString::from(address.to_string());
-    let item =
-        cx.new(|cx| HerdrTerminal::new(address, weak_workspace, workspace_id, project, window, cx));
-    workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
+fn placed_key(workspace_id: workspace::WorkspaceId) -> String {
+    format!("{PANEL_KEY}-placed-{}", i64::from(workspace_id))
 }
 
-/// For each workspace where Herdr Core runs programs, a group named after
-/// it with an overview of its programs, a layout for the terminals of its
-/// main worktree and one per other worktree. A layout that exists already,
-/// by name and scope, is not made again. The layout on screen stays.
-fn layouts_from_running_projects(
+/// The addresses of the Herdr tabs of every layout of a window.
+fn shown_herdr_addresses(workspace: &Workspace, cx: &App) -> HashSet<SharedString> {
+    workspace
+        .layouts()
+        .iter()
+        .flat_map(|layout| workspace.layout_panes(layout.id()))
+        .flat_map(|pane| {
+            pane.read(cx)
+                .items()
+                .filter_map(|item| item.downcast::<HerdrTerminal>())
+                .map(|terminal| terminal.read(cx).address().clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The scope of the layout for a place: its worktree, or its workspace.
+fn place_scope(place: &Place) -> LayoutScope {
+    LayoutScope {
+        machine: place.machine.clone(),
+        folder: match &place.worktree {
+            Some(worktree) => worktree_folder(&place.workspace, worktree),
+            None => place.workspace.clone(),
+        },
+    }
+}
+
+/// Opens a tab for each program in the layout of its place, without
+/// showing that layout. A workspace seen for the first time gets a group
+/// named after it, with an overview of its programs; each worktree gets a
+/// layout, `main` for the main one.
+fn place_programs(
     workspace: &mut Workspace,
+    programs: Vec<(String, Place)>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let store = HerdrStore::global(cx);
-    let roots = project_roots(workspace.project(), &store, cx);
-    let mut projects: BTreeMap<(Option<String>, String), BTreeMap<Option<String>, Vec<String>>> =
-        BTreeMap::new();
-    for record in store.read(cx).terminals() {
-        if !record.is_live() {
+    for (address, place) in programs {
+        let group = folder_name(&place.workspace);
+        let workspace_scope = LayoutScope {
+            machine: place.machine.clone(),
+            folder: place.workspace.clone(),
+        };
+        let has_overview = workspace
+            .layouts()
+            .iter()
+            .any(|layout| layout.scope() == Some(&workspace_scope) && **layout.name() == *OVERVIEW);
+        if !has_overview {
+            let overview = workspace.add_hidden_layout(
+                OVERVIEW,
+                group.clone(),
+                Some(workspace_scope.clone()),
+                window,
+                cx,
+            );
+            if let Some(pane) = workspace.layout_active_pane(overview) {
+                let weak_workspace = cx.entity().downgrade();
+                let workspace_id = workspace.database_id();
+                let view = ProcessView::scoped(Some(workspace_scope));
+                let item = cx
+                    .new(|cx| HerdrProcesses::new(weak_workspace, workspace_id, view, window, cx));
+                pane.update(cx, |pane, cx| {
+                    pane.add_item(Box::new(item), false, false, None, window, cx);
+                });
+            }
+        }
+        let scope = place_scope(&place);
+        let existing = workspace
+            .layouts()
+            .iter()
+            .find(|layout| layout.scope() == Some(&scope) && **layout.name() != *OVERVIEW)
+            .map(|layout| layout.id());
+        let layout = existing.unwrap_or_else(|| {
+            let name = place.worktree.clone().unwrap_or_else(|| "main".to_string());
+            workspace.add_hidden_layout(name, group.clone(), Some(scope), window, cx)
+        });
+        let Some(pane) = workspace.layout_active_pane(layout) else {
             continue;
-        }
-        let place = place_of(record.machine(), record.current_folder(), &roots);
-        projects
-            .entry((place.machine, place.workspace))
-            .or_default()
-            .entry(place.worktree)
-            .or_default()
-            .push(record.address.clone());
+        };
+        let weak_workspace = cx.entity().downgrade();
+        let workspace_id = workspace.database_id();
+        let project = workspace.project().downgrade();
+        let address = SharedString::from(address);
+        let item = cx.new(|cx| {
+            HerdrTerminal::new(address, weak_workspace, workspace_id, project, window, cx)
+        });
+        pane.update(cx, |pane, cx| {
+            pane.add_item(Box::new(item), false, false, None, window, cx);
+        });
     }
-    let existing = workspace
-        .layouts()
-        .iter()
-        .map(|layout| (layout.name().to_string(), layout.scope().cloned()))
-        .collect::<HashSet<_>>();
-    let shown = workspace.active_layout();
-    for ((machine, folder), worktrees) in projects {
-        let group = folder_name(&folder);
-        let mut wanted = vec![("Overview".to_string(), folder.clone(), None)];
-        for (worktree, addresses) in worktrees {
-            match worktree {
-                None => wanted.push(("main".to_string(), folder.clone(), Some(addresses))),
-                Some(worktree) => {
-                    let folder = worktree_folder(&folder, &worktree);
-                    wanted.push((worktree, folder, Some(addresses)));
-                }
-            }
-        }
-        for (name, scope_folder, addresses) in wanted {
-            let scope = LayoutScope {
-                machine: machine.clone(),
-                folder: scope_folder,
-            };
-            if existing.contains(&(name.clone(), Some(scope.clone()))) {
-                continue;
-            }
-            let layout = workspace.create_layout(name, group.clone(), window, cx);
-            workspace.set_layout_scope(layout, Some(scope.clone()), window, cx);
-            match addresses {
-                None => add_process_table(workspace, Some(scope), window, cx),
-                Some(addresses) => {
-                    for address in addresses {
-                        add_herdr_view(workspace, &address, window, cx);
-                    }
-                }
-            }
-        }
-    }
-    workspace.activate_layout(shown, window, cx);
 }
 
 /// The folder of a worktree kept under `.worktrees/` of its workspace.
@@ -2413,7 +2616,9 @@ pub(crate) fn place_of(
     }
     let workspace = roots
         .iter()
-        .filter(|(root_machine, root)| *root_machine == machine && is_within(folder, root))
+        .filter(|(root_machine, root)| {
+            *root_machine == machine && is_within(folder, root) && !is_home_folder(root)
+        })
         .map(|(_, root)| root.trim_end_matches(['/', '\\']))
         .max_by_key(|root| root.len())
         .unwrap_or(folder)
@@ -2423,6 +2628,10 @@ pub(crate) fn place_of(
         workspace,
         worktree: None,
     }
+}
+
+fn is_home_folder(folder: &str) -> bool {
+    folder_components(folder) == ["~"]
 }
 
 /// The name a folder goes by: its last name, or `~` for a home folder.
@@ -2856,6 +3065,94 @@ impl Render for LayoutPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_home_folder_holds_no_workspace() {
+        let roots = [(Some("dgx".to_string()), "/home/person".to_string())];
+        let place = place_of(Some("dgx"), "/home/person/projects/tea", &roots);
+        assert_eq!(place.workspace, "/home/person/projects/tea");
+    }
+
+    #[gpui::test]
+    async fn test_programs_are_placed_by_workspace_and_worktree(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            super::init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/project"), serde_json::json!({}))
+            .await;
+        let project = Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let place = |worktree: Option<&str>| Place {
+            machine: Some("dgx".to_string()),
+            workspace: "/home/person/tea".to_string(),
+            worktree: worktree.map(str::to_string),
+        };
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            place_programs(
+                workspace,
+                vec![
+                    ("dgx/t1".to_string(), place(None)),
+                    ("dgx/t2".to_string(), place(Some("menu"))),
+                    ("dgx/t3".to_string(), place(None)),
+                ],
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            let layouts = workspace
+                .layouts()
+                .iter()
+                .map(|layout| {
+                    let tabs = workspace
+                        .layout_panes(layout.id())
+                        .iter()
+                        .map(|pane| pane.read(cx).items_len())
+                        .sum::<usize>();
+                    (
+                        layout.name().to_string(),
+                        layout.group().to_string(),
+                        layout.scope().map(|scope| scope.folder.clone()),
+                        tabs,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                layouts,
+                vec![
+                    ("Main".to_string(), String::new(), None, 0),
+                    (
+                        "Overview".to_string(),
+                        "tea".to_string(),
+                        Some("/home/person/tea".to_string()),
+                        1
+                    ),
+                    (
+                        "main".to_string(),
+                        "tea".to_string(),
+                        Some("/home/person/tea".to_string()),
+                        2
+                    ),
+                    (
+                        "menu".to_string(),
+                        "tea".to_string(),
+                        Some("/home/person/tea/.worktrees/menu".to_string()),
+                        1
+                    ),
+                ]
+            );
+            assert_eq!(workspace.active_layout(), workspace.layouts()[0].id());
+        });
+    }
 
     #[gpui::test]
     async fn test_a_workspace_opens_a_table_while_it_is_updated(cx: &mut gpui::TestAppContext) {

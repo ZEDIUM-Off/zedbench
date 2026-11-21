@@ -673,6 +673,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::DocumentFoldingRanges>(render_dropdown)
         .add_basic_renderer::<settings::DocumentSymbols>(render_dropdown)
         .add_basic_renderer::<settings::TerminalBell>(render_dropdown)
+        .add_basic_renderer::<settings::TerminalBackend>(render_dropdown)
         // please semicolon stay on next line
         ;
 

@@ -2349,6 +2349,10 @@
     "show_count_badge": false,
     // Whether to invoke the OS-specific alert sound when the terminal bell (BEL character) is printed.
     "bell": "off",
+    // What runs the terminals that `workspace: new center terminal` opens:
+    // "herdr": Herdr Core, in the scope of the layout on screen.
+    // "zed": Zed, in the folder of the project.
+    "backend": "herdr",
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

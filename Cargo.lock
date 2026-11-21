@@ -20686,6 +20686,7 @@ dependencies = [
  "editor",
  "futures 0.3.34",
  "gpui",
+ "herdr",
  "itertools 0.14.0",
  "language",
  "log",

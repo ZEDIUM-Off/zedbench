@@ -20,7 +20,8 @@ use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{
-    SeedQuerySetting, Settings, SettingsStore, TerminalBell, TerminalBlink, WorkingDirectory,
+    SeedQuerySetting, Settings, SettingsStore, TerminalBackend, TerminalBell, TerminalBlink,
+    WorkingDirectory,
 };
 use std::{
     any::Any,
@@ -229,6 +230,10 @@ impl TerminalView {
         cx: &mut Context<Workspace>,
     ) {
         let local = action.local;
+        if !local && TerminalSettings::get_global(cx).backend == TerminalBackend::Herdr {
+            window.dispatch_action(Box::new(herdr::NewTerminal), cx);
+            return;
+        }
         let working_directory = default_working_directory(workspace, cx);
         TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
             if local {

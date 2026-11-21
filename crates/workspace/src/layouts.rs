@@ -268,6 +268,56 @@ impl Workspace {
         id
     }
 
+    /// Adds a layout with a scope without showing it: the layout on screen
+    /// and the focus stay where they are.
+    pub fn add_hidden_layout(
+        &mut self,
+        name: impl Into<SharedString>,
+        group: impl Into<SharedString>,
+        scope: Option<LayoutScope>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> LayoutId {
+        let id = LayoutId(self.layouts.next_id);
+        self.layouts.next_id += 1;
+        self.layouts.customized = true;
+        let focused = window.focused(cx);
+        // A new pane takes the focus; the hidden layout must not.
+        let pane = self.add_pane(window, cx);
+        match focused {
+            Some(focused) => window.focus(&focused, cx),
+            None => window.focus(&self.active_pane().focus_handle(cx), cx),
+        }
+        let mut center = PaneGroup::new(pane.clone());
+        center.set_is_center(true);
+        self.layouts.layouts.push(Layout {
+            id,
+            name: name.into(),
+            group: group.into(),
+            scope,
+            parked: Some(ParkedLayout {
+                center,
+                active_pane: pane,
+                maximized_pane: None,
+            }),
+        });
+        cx.emit(Event::LayoutsChanged);
+        self.serialize_workspace(window, cx);
+        cx.notify();
+        id
+    }
+
+    /// The pane where a layout puts a new tab: the active pane of the one on
+    /// screen, the pane that was active in a hidden one.
+    pub fn layout_active_pane(&self, id: LayoutId) -> Option<Entity<Pane>> {
+        if id == self.layouts.active {
+            return Some(self.active_pane().clone());
+        }
+        self.layouts
+            .parked(id)
+            .map(|parked| parked.active_pane.clone())
+    }
+
     /// Shows a layout. The panes of the one it replaces keep their items.
     pub fn activate_layout(&mut self, id: LayoutId, window: &mut Window, cx: &mut Context<Self>) {
         if id == self.layouts.active {

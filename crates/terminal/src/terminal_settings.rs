@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 pub use settings::AlternateScroll;
 
 use settings::{
-    IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory,
+    IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBackend, TerminalBell,
+    TerminalBlink, TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory,
     merge_from::MergeFrom,
 };
 use task::Shell;
@@ -52,6 +52,7 @@ pub struct TerminalSettings {
     pub path_hyperlink_timeout_ms: u64,
     pub show_count_badge: bool,
     pub bell: TerminalBell,
+    pub backend: TerminalBackend,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -137,6 +138,7 @@ impl settings::Settings for TerminalSettings {
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
             show_count_badge: user_content.show_count_badge.unwrap(),
             bell: user_content.bell.unwrap(),
+            backend: user_content.backend.unwrap_or_default(),
         }
     }
 }

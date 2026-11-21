@@ -6260,9 +6260,23 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn terminal_panel_section() -> [SettingsPageItem; 5] {
+    fn terminal_panel_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Terminal Panel"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Terminal Backend",
+                description: "What runs the terminals that New Center Terminal opens: Herdr Core, in the scope of the layout on screen, or Zed.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.backend"),
+                    pick: |settings_content| settings_content.terminal.as_ref()?.backend.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.terminal.get_or_insert_default().backend = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Terminal Dock",
                 description: "Where to dock the terminal panel.",

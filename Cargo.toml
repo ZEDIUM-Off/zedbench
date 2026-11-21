@@ -109,6 +109,7 @@ members = [
     "crates/gpui_windows",
     "crates/grammars",
     "crates/hang_telemetry",
+    "crates/herdr",
     "crates/html_to_markdown",
     "crates/http_client",
     "crates/http_client_tls",
@@ -132,6 +133,7 @@ members = [
     "crates/language_onboarding",
     "crates/language_selector",
     "crates/language_tools",
+    "crates/layouts_panel",
     "crates/languages",
     "crates/line_ending_selector",
     "crates/livekit_api",
@@ -392,6 +394,7 @@ gpui_wgpu = { path = "crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
 grammars = { path = "crates/grammars" }
 hang_telemetry = { path = "crates/hang_telemetry" }
+herdr = { path = "crates/herdr" }
 html_to_markdown = { path = "crates/html_to_markdown" }
 http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
@@ -415,6 +418,7 @@ language_models_cloud = { path = "crates/language_models_cloud" }
 language_onboarding = { path = "crates/language_onboarding" }
 language_selector = { path = "crates/language_selector" }
 language_tools = { path = "crates/language_tools" }
+layouts_panel = { path = "crates/layouts_panel" }
 languages = { path = "crates/languages" }
 line_ending_selector = { path = "crates/line_ending_selector" }
 livekit_api = { path = "crates/livekit_api" }

@@ -211,6 +211,7 @@ node_runtime.workspace = true
 notifications = { workspace = true, optional = true }
 onboarding.workspace = true
 outline.workspace = true
+layouts_panel.workspace = true
 outline_panel.workspace = true
 parking_lot.workspace = true
 paths.workspace = true

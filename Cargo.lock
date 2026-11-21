@@ -9603,6 +9603,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "herdr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "futures 0.3.34",
+ "gpui",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "util",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11455,6 +11470,32 @@ dependencies = [
  "unindent",
  "url",
  "util",
+]
+
+[[package]]
+name = "layouts_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "herdr",
+ "log",
+ "menu",
+ "parking_lot",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
@@ -25279,6 +25320,7 @@ dependencies = [
  "language_selector",
  "language_tools",
  "languages",
+ "layouts_panel",
  "line_ending_selector",
  "log",
  "lsp_command_selector",

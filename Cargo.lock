@@ -11487,6 +11487,7 @@ dependencies = [
  "menu",
  "parking_lot",
  "project",
+ "remote",
  "serde",
  "serde_json",
  "settings",

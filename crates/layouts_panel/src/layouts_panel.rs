@@ -3,29 +3,34 @@
 //! A layout arranges views; the core owns the programs. Nothing here starts
 //! or ends a program unless the person asks for exactly that.
 
+mod herdr_processes;
 mod herdr_terminal;
 
 use anyhow::Result;
-use collections::{HashMap, HashSet};
+use collections::HashSet;
 use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, actions::SelectAll};
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, AsyncWindowContext, Axis, ClickEvent,
     Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, PromptLevel, Role, ScrollHandle,
-    SharedString, Subscription, WeakEntity, Window, actions, px,
+    SharedString, Subscription, Task, WeakEntity, Window, actions, px,
 };
 use herdr::{AgentState, ConnectionState, HerdrStore, RunParams, TerminalRecord};
+use herdr_processes::{HerdrProcesses, ProcessView};
 use project::Project;
+use remote::RemoteConnectionOptions;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use theme::ActiveTheme as _;
 use ui::{
-    ContextMenu, CountBadge, IconButtonShape, Indicator, PopoverMenu, Tooltip, prelude::*,
-    right_click_menu, tooltip_container,
+    ContextMenu, CountBadge, Disclosure, IconButtonShape, Indicator, PopoverMenu, Tooltip,
+    prelude::*, right_click_menu, tooltip_container,
 };
 use util::ResultExt as _;
 use workspace::{
     LayoutId, LayoutOutline, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
+    notifications::NotifyTaskExt as _,
 };
 
 pub use herdr_terminal::{
@@ -45,6 +50,11 @@ actions!(
         NextLayout,
         /// Shows the previous layout of the window.
         PreviousLayout,
+        /// Starts a shell in Herdr Core, in the folder of the project, and
+        /// opens its tab.
+        NewHerdrTerminal,
+        /// Opens a table of every program that Herdr Core runs.
+        OpenProcesses,
     ]
 );
 
@@ -59,6 +69,7 @@ const PREVIEW_ROWS: usize = 6;
 
 pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<HerdrTerminal>(cx);
+    workspace::register_serializable_item::<HerdrProcesses>(cx);
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<LayoutsPanel>(window, cx);
@@ -76,6 +87,12 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &PreviousLayout, window, cx| {
             workspace.activate_adjacent_layout(false, window, cx);
+        });
+        workspace.register_action(|workspace, _: &NewHerdrTerminal, window, cx| {
+            new_herdr_terminal(workspace, window, cx);
+        });
+        workspace.register_action(|workspace, _: &OpenProcesses, window, cx| {
+            open_processes(workspace, window, cx);
         });
     })
     .detach();
@@ -109,39 +126,13 @@ fn new_layout(
     workspace.create_layout(name, group, window, cx)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Section {
-    Agents,
-    Terminals,
-    Ended,
-}
-
-impl Section {
-    fn title(self) -> &'static str {
-        match self {
-            Section::Agents => "Agents",
-            Section::Terminals => "Terminals",
-            Section::Ended => "Ended",
-        }
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            Section::Agents => "agents",
-            Section::Terminals => "terminals",
-            Section::Ended => "ended",
-        }
-    }
-}
-
 #[derive(Default, Serialize, Deserialize)]
 struct SerializedLayoutsPanel {
     #[serde(default)]
     folded_groups: Vec<String>,
+    /// Layouts, workspaces and worktrees whose terminals are folded.
     #[serde(default)]
-    folded_sections: Vec<String>,
-    #[serde(default)]
-    project_only: bool,
+    folded_nodes: Vec<String>,
     #[serde(default)]
     wide_width: Option<f32>,
 }
@@ -179,6 +170,8 @@ struct LayoutSummary {
     ended: usize,
     blocked: usize,
     working: usize,
+    /// Its Herdr tabs, where they work.
+    herdr: Vec<(Place, TerminalRow)>,
 }
 
 impl LayoutSummary {
@@ -244,9 +237,7 @@ pub struct LayoutsPanel {
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     folded_groups: HashSet<SharedString>,
-    folded_sections: HashSet<Section>,
-    /// Lists only what runs in a folder of the project of the window.
-    project_only: bool,
+    folded_nodes: HashSet<String>,
     /// The width to give back when the panel leaves its narrow form.
     wide_width: Pixels,
     editing: Option<Editing>,
@@ -281,15 +272,6 @@ impl LayoutsPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = HerdrStore::global(cx);
-        let folded_sections = [Section::Agents, Section::Terminals, Section::Ended]
-            .into_iter()
-            .filter(|section| {
-                serialized
-                    .folded_sections
-                    .iter()
-                    .any(|key| key == section.key())
-            })
-            .collect();
         Self {
             _subscriptions: vec![
                 cx.observe(&store, |_, _, cx| cx.notify()),
@@ -305,8 +287,7 @@ impl LayoutsPanel {
                 .into_iter()
                 .map(SharedString::from)
                 .collect(),
-            folded_sections,
-            project_only: serialized.project_only,
+            folded_nodes: serialized.folded_nodes.into_iter().collect(),
             wide_width: serialized.wide_width.map_or(DEFAULT_WIDTH, px),
             editing: None,
             error: None,
@@ -320,12 +301,7 @@ impl LayoutsPanel {
                 .iter()
                 .map(|group| group.to_string())
                 .collect(),
-            folded_sections: self
-                .folded_sections
-                .iter()
-                .map(|section| section.key().to_string())
-                .collect(),
-            project_only: self.project_only,
+            folded_nodes: self.folded_nodes.iter().cloned().collect(),
             wide_width: Some(f32::from(self.wide_width)),
         };
         let kvp = KeyValueStore::global(cx);
@@ -371,7 +347,12 @@ impl LayoutsPanel {
         });
     }
 
-    fn layout_summaries(&self, workspace: &Workspace, cx: &App) -> Vec<LayoutSummary> {
+    fn layout_summaries(
+        &self,
+        workspace: &Workspace,
+        roots: &[(Option<String>, String)],
+        cx: &App,
+    ) -> Vec<LayoutSummary> {
         let store = self.store.read(cx);
         let active = workspace.active_layout();
         workspace
@@ -389,6 +370,7 @@ impl LayoutsPanel {
                     ended: 0,
                     blocked: 0,
                     working: 0,
+                    herdr: self.layout_terminals(workspace, layout.id(), roots, cx),
                 };
                 for pane in workspace.layout_panes(layout.id()) {
                     for item in pane.read(cx).items() {
@@ -419,124 +401,52 @@ impl LayoutsPanel {
             .collect()
     }
 
-    /// For each terminal with a tab, the name of the layout that shows it.
-    fn layouts_by_address(
+    /// The Herdr tabs of a layout, one line per terminal, where they work.
+    fn layout_terminals(
         &self,
         workspace: &Workspace,
+        layout: LayoutId,
+        roots: &[(Option<String>, String)],
         cx: &App,
-    ) -> HashMap<SharedString, SharedString> {
-        let mut layouts = HashMap::default();
-        for layout in workspace.layouts() {
-            for pane in workspace.layout_panes(layout.id()) {
-                for item in pane.read(cx).items() {
-                    if let Some(terminal) = item.downcast::<HerdrTerminal>()
-                        && terminal.read(cx).record(cx).is_some()
-                    {
-                        layouts
-                            .entry(terminal.read(cx).address().clone())
-                            .or_insert_with(|| layout.name().clone());
-                    }
+    ) -> Vec<(Place, TerminalRow)> {
+        let store = self.store.read(cx);
+        let mut seen = HashSet::default();
+        let mut entries = Vec::new();
+        for pane in workspace.layout_panes(layout) {
+            for item in pane.read(cx).items() {
+                let Some(terminal) = item.downcast::<HerdrTerminal>() else {
+                    continue;
+                };
+                let terminal = terminal.read(cx);
+                if !seen.insert(terminal.address().clone()) {
+                    continue;
                 }
+                let is_ended = terminal.is_ended(cx);
+                let record = terminal
+                    .record(cx)
+                    .or_else(|| store.terminal(terminal.address()).filter(|_| !is_ended));
+                let entry = match record {
+                    Some(record) => (
+                        place_of(record.machine(), record.current_folder(), roots),
+                        terminal_row(record, !is_ended),
+                    ),
+                    None => (
+                        Place::default(),
+                        TerminalRow {
+                            address: terminal.address().clone(),
+                            name: terminal.address().clone(),
+                            detail: "Gone from Herdr Core".into(),
+                            tooltip: terminal.address().clone(),
+                            state: None,
+                            is_agent: false,
+                            is_live: false,
+                        },
+                    ),
+                };
+                entries.push(entry);
             }
         }
-        layouts
-    }
-
-    fn project_roots(&self, cx: &App) -> Vec<String> {
-        self.project
-            .read(cx)
-            .visible_worktrees(cx)
-            .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
-            .collect()
-    }
-
-    fn terminal_rows(&self, workspace: &Workspace, cx: &App) -> Vec<TerminalRow> {
-        let layouts = self.layouts_by_address(workspace, cx);
-        let roots = self.project_roots(cx);
-        let mut rows = self
-            .store
-            .read(cx)
-            .terminals()
-            .into_iter()
-            // A terminal with a tab in this window stays in sight: the
-            // shell started on another machine from here runs in no folder
-            // of the project.
-            .filter(|record| {
-                !self.project_only
-                    || runs_in(record, &roots)
-                    || layouts.contains_key(record.address.as_str())
-            })
-            .map(|record| {
-                let address = SharedString::from(record.address.clone());
-                let mut detail = Vec::new();
-                if let Some(machine) = record.machine() {
-                    detail.push(machine.to_string());
-                }
-                detail.push(short_folder(record.current_folder()));
-                if let Some(layout) = layouts.get(&address) {
-                    detail.push(format!("in {layout}"));
-                }
-                let mut tooltip = vec![format!("{} · {}", record.address, record.program())];
-                tooltip.push(record.current_folder().to_string());
-                if let Some(message) = record
-                    .status
-                    .as_ref()
-                    .and_then(|status| status.msg.as_deref())
-                    .filter(|message| !message.is_empty())
-                {
-                    tooltip.push(message.to_string());
-                }
-                TerminalRow {
-                    address,
-                    name: record.display_name().into(),
-                    detail: detail.join(" · ").into(),
-                    tooltip: tooltip.join("\n").into(),
-                    state: record.agent_state(),
-                    is_agent: is_agent(record),
-                    is_live: record.is_live(),
-                }
-            })
-            .collect::<Vec<_>>();
-        // Who needs a person comes first; then who works.
-        rows.sort_by_key(|row| row.state.unwrap_or(AgentState::Idle));
-        rows
-    }
-
-    fn run_targets(&self, cx: &App) -> Vec<RunTarget> {
-        let project = self.project.read(cx);
-        let root = self.project_roots(cx).into_iter().next();
-        let is_local = project.is_local();
-        let place = |machine: &str, folder: Option<&String>| -> SharedString {
-            match folder {
-                Some(folder) => format!("{machine} · {}", short_folder(folder)).into(),
-                None => format!("{machine} · home folder").into(),
-            }
-        };
-        let here = RunTarget {
-            machine: None,
-            folder: root.clone().filter(|_| is_local),
-            label: place("This machine", root.as_ref().filter(|_| is_local)),
-        };
-        let machines = self
-            .store
-            .read(cx)
-            .machines()
-            .iter()
-            .filter(|machine| machine.is_connected())
-            .map(|machine| {
-                let folder = root.clone().filter(|_| !is_local);
-                RunTarget {
-                    machine: Some(machine.name.clone()),
-                    label: place(&machine.name, folder.as_ref()),
-                    folder,
-                }
-            });
-        // The place of the project comes first.
-        if is_local {
-            std::iter::once(here).chain(machines).collect()
-        } else {
-            machines.chain(std::iter::once(here)).collect()
-        }
+        entries
     }
 
     fn start_edit(
@@ -658,27 +568,12 @@ impl LayoutsPanel {
         cx: &mut Context<Self>,
     ) {
         self.error = None;
-        let run = self.store.read(cx).run(
-            RunParams {
-                line,
-                cwd: target.folder.clone(),
-                on: target.machine.clone(),
-                no_parent: true,
-                no_notify: true,
-                ..RunParams::default()
-            },
-            cx,
-        );
-        let workspace = self.workspace.clone();
-        cx.spawn_in(window, async move |this, cx| {
+        let run = run_in_herdr(self.workspace.clone(), target, line, window, cx);
+        cx.spawn(async move |this, cx| {
             let result = run.await;
-            let record = this.update(cx, |this, cx| this.report(result, cx))?;
-            if let Some(record) = record {
-                workspace.update_in(cx, |workspace, window, cx| {
-                    open_herdr_terminal(workspace, &record.address, window, cx);
-                })?;
-            }
-            anyhow::Ok(())
+            this.update(cx, |this, cx| {
+                this.report(result, cx);
+            })
         })
         .detach_and_log_err(cx);
     }
@@ -700,15 +595,7 @@ impl LayoutsPanel {
         let address = address.to_string();
         let name = name.to_string();
         self.update_workspace(window, cx, move |workspace, window, cx| {
-            let layout = new_layout(workspace, window, cx);
-            workspace.rename_layout(layout, name, window, cx);
-            let weak_workspace = cx.entity().downgrade();
-            let workspace_id = workspace.database_id();
-            let project = workspace.project().downgrade();
-            let item = cx.new(|cx| {
-                HerdrTerminal::new(address, weak_workspace, workspace_id, project, window, cx)
-            });
-            workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+            open_in_new_layout(workspace, &address, &name, window, cx);
         });
     }
 
@@ -719,20 +606,9 @@ impl LayoutsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &format!("End the program of “{name}”?"),
-            Some("Herdr Core hangs up on it, then terminates it. What it did not save is lost."),
-            &["End Program", "Cancel"],
-            cx,
-        );
-        let address = address.to_string();
+        let end = end_program(&self.store, address, name, window, cx);
         cx.spawn(async move |this, cx| {
-            if answer.await != Ok(0) {
-                return anyhow::Ok(());
-            }
-            let kill = this.update(cx, |this, cx| this.store.read(cx).kill(&address, cx))?;
-            let result = kill.await;
+            let result = end.await;
             this.update(cx, |this, cx| {
                 this.report(result, cx);
             })
@@ -767,9 +643,9 @@ impl LayoutsPanel {
         cx.notify();
     }
 
-    fn toggle_section(&mut self, section: Section, cx: &mut Context<Self>) {
-        if !self.folded_sections.remove(&section) {
-            self.folded_sections.insert(section);
+    fn toggle_node(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.folded_nodes.remove(key) {
+            self.folded_nodes.insert(key.to_string());
         }
         self.serialize(cx);
         cx.notify();
@@ -929,6 +805,18 @@ impl LayoutsPanel {
                         })
                         .when(layout.blocked > 0, |row| {
                             row.child(CountBadge::new(layout.blocked))
+                        })
+                        .when(!layout.herdr.is_empty(), |row| {
+                            let key = layout_key(id);
+                            row.child(
+                                Disclosure::new(
+                                    ("layout-terminals", index),
+                                    !self.folded_nodes.contains(&key),
+                                )
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.toggle_node(&key, cx)),
+                                ),
+                            )
                         })
                 }
             })
@@ -1095,6 +983,7 @@ impl LayoutsPanel {
         for (index, layout) in layouts.iter().enumerate() {
             if layout.group.is_empty() {
                 list = list.child(self.render_layout(index, layout, &groups, narrow, cx));
+                list = list.children(self.render_terminals_of(layout, narrow, cx));
             }
         }
         for (group_index, group) in groups.iter().enumerate() {
@@ -1166,50 +1055,169 @@ impl LayoutsPanel {
             if !is_folded {
                 for (index, layout) in members {
                     list = list.child(self.render_layout(index, layout, &groups, narrow, cx));
+                    list = list.children(self.render_terminals_of(layout, narrow, cx));
                 }
             }
         }
         list.into_any_element()
     }
 
-    fn render_section(
+    fn render_terminals_of(
         &self,
-        section: Section,
-        rows: &[&TerminalRow],
+        layout: &LayoutSummary,
+        narrow: bool,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if rows.is_empty() {
-            return None;
+    ) -> Vec<AnyElement> {
+        if narrow || self.folded_nodes.contains(&layout_key(layout.id)) {
+            return Vec::new();
         }
-        let is_folded = self.folded_sections.contains(&section);
+        self.render_layout_tree(layout.id, &layout.herdr, cx)
+    }
+
+    /// The Herdr tabs of a layout by workspace, then worktree, then agents
+    /// and terminals. The terminals of the main worktree of a workspace sit
+    /// right under it.
+    fn render_layout_tree(
+        &self,
+        layout: LayoutId,
+        entries: &[(Place, TerminalRow)],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut workspaces: BTreeMap<
+            (Option<String>, String),
+            BTreeMap<Option<String>, Vec<&TerminalRow>>,
+        > = BTreeMap::new();
+        for (place, row) in entries {
+            workspaces
+                .entry((place.machine.clone(), place.workspace.clone()))
+                .or_default()
+                .entry(place.worktree.clone())
+                .or_default()
+                .push(row);
+        }
+        let prefix = layout_key(layout);
+        let mut elements = Vec::new();
+        for ((machine, folder), worktrees) in workspaces {
+            let key = format!("{prefix}:{}:{folder}", machine.as_deref().unwrap_or(""));
+            let is_folded = self.folded_nodes.contains(&key);
+            let rows = worktrees.values().flatten().copied().collect::<Vec<_>>();
+            let name: SharedString = if folder.is_empty() {
+                "Unknown place".into()
+            } else {
+                folder_name(&folder).into()
+            };
+            let tooltip: SharedString = match &machine {
+                Some(machine) => format!("{machine} · {}", display_folder(&folder)).into(),
+                None => display_folder(&folder).into(),
+            };
+            elements.push(self.render_node_header(
+                &key,
+                IconName::Folder,
+                name,
+                machine.clone().map(SharedString::from),
+                tooltip,
+                &rows,
+                1,
+                is_folded,
+                cx,
+            ));
+            if is_folded {
+                continue;
+            }
+            for (worktree, rows) in worktrees {
+                match worktree {
+                    None => self.render_kinds(&key, &rows, 2, &mut elements, cx),
+                    Some(worktree) => {
+                        let key = format!("{key}:{worktree}");
+                        let is_folded = self.folded_nodes.contains(&key);
+                        elements.push(self.render_node_header(
+                            &key,
+                            IconName::GitBranch,
+                            worktree.clone().into(),
+                            None,
+                            format!("Worktree {worktree}").into(),
+                            &rows,
+                            2,
+                            is_folded,
+                            cx,
+                        ));
+                        if !is_folded {
+                            self.render_kinds(&key, &rows, 3, &mut elements, cx);
+                        }
+                    }
+                }
+            }
+        }
+        elements
+    }
+
+    /// The agents, then the terminals, each under its own caption.
+    fn render_kinds(
+        &self,
+        key: &str,
+        rows: &[&TerminalRow],
+        depth: usize,
+        elements: &mut Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) {
+        for (is_agent, caption) in [(true, "Agents"), (false, "Terminals")] {
+            let kind = rows
+                .iter()
+                .filter(|row| row.is_agent == is_agent)
+                .collect::<Vec<_>>();
+            if kind.is_empty() {
+                continue;
+            }
+            elements.push(
+                div()
+                    .pl(indent(depth))
+                    .pt_0p5()
+                    .child(
+                        Label::new(caption)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Placeholder),
+                    )
+                    .into_any_element(),
+            );
+            for row in kind {
+                elements.push(self.render_terminal(key, row, depth, cx));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_node_header(
+        &self,
+        key: &str,
+        icon: IconName,
+        name: SharedString,
+        machine: Option<SharedString>,
+        tooltip: SharedString,
+        rows: &[&TerminalRow],
+        depth: usize,
+        is_folded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let blocked = rows
             .iter()
-            .filter(|row| row.state == Some(AgentState::Blocked))
+            .filter(|row| row.is_live && row.state == Some(AgentState::Blocked))
             .count();
-        let header = h_flex()
-            .id(section.key())
+        let working = rows
+            .iter()
+            .filter(|row| row.is_live && row.state == Some(AgentState::Working))
+            .count();
+        h_flex()
+            .id(SharedString::from(format!("herdr-node-{key}")))
             .role(Role::Button)
-            .aria_label(format!("{} · {}", section.title(), rows.len()))
+            .aria_label(format!("{name} · {}", rows.len()))
             .aria_expanded(!is_folded)
             .w_full()
-            .gap_1p5()
-            .px_1p5()
-            .py_0p5()
+            .gap_1()
+            .pl(indent(depth))
+            .pr_1p5()
             .rounded_sm()
             .cursor_pointer()
             .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
-            .child(
-                Label::new(section.title())
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
-            .child(div().flex_1())
-            .when(blocked > 0, |header| header.child(CountBadge::new(blocked)))
-            .child(
-                Label::new(rows.len().to_string())
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
             .child(
                 Icon::new(if is_folded {
                     IconName::ChevronRight
@@ -1219,26 +1227,48 @@ impl LayoutsPanel {
                 .size(IconSize::XSmall)
                 .color(Color::Muted),
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(section, cx)));
-        Some(
-            v_flex()
-                .w_full()
-                .gap_px()
-                .child(header)
-                .when(!is_folded, |list| {
-                    list.children(
-                        rows.iter()
-                            .map(|row| self.render_terminal(section, row, cx)),
-                    )
-                })
-                .into_any_element(),
-        )
+            .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(Label::new(name).size(LabelSize::Small).truncate())
+                    .when_some(machine, |line, machine| {
+                        line.child(
+                            Label::new(machine)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                    }),
+            )
+            .when(is_folded && blocked > 0, |header| {
+                header.child(CountBadge::new(blocked))
+            })
+            .when(is_folded && blocked == 0 && working > 0, |header| {
+                header.child(Indicator::dot().color(Color::Warning))
+            })
+            .when(is_folded, |header| {
+                header.child(
+                    Label::new(rows.len().to_string())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
+            .tooltip(Tooltip::text(tooltip))
+            .on_click(cx.listener({
+                let key = key.to_string();
+                move |this, _, _, cx| this.toggle_node(&key, cx)
+            }))
+            .into_any_element()
     }
 
     fn render_terminal(
         &self,
-        section: Section,
+        key: &str,
         row: &TerminalRow,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -1246,20 +1276,23 @@ impl LayoutsPanel {
         let name = row.name.clone();
         let is_live = row.is_live;
         let element = h_flex()
-            .id(SharedString::from(format!(
-                "herdr-{}-{}",
-                section.key(),
-                row.address
-            )))
+            .id(SharedString::from(format!("herdr-{key}-{}", row.address)))
             .role(Role::Button)
-            .aria_label(match row.state.filter(|_| row.is_live) {
-                Some(state) => format!("{} · {} · {}", row.name, row.detail, state.label()),
-                None => format!("{} · {}", row.name, row.detail),
+            .aria_label({
+                let mut label = vec![row.name.to_string()];
+                if !row.detail.is_empty() {
+                    label.push(row.detail.to_string());
+                }
+                if let Some(state) = row.state.filter(|_| row.is_live) {
+                    label.push(state.label().to_string());
+                }
+                label.join(" · ")
             })
             .w_full()
             .gap_2()
-            .px_1p5()
-            .py_1()
+            .pl(indent(depth))
+            .pr_1p5()
+            .py_0p5()
             .rounded_sm()
             .cursor_pointer()
             .hover(|style| style.bg(colors.ghost_element_hover))
@@ -1296,12 +1329,14 @@ impl LayoutsPanel {
                             .size(LabelSize::Small)
                             .truncate(),
                     )
-                    .child(
-                        Label::new(row.detail.clone())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
-                    ),
+                    .when(!row.detail.is_empty(), |column| {
+                        column.child(
+                            Label::new(row.detail.clone())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                    }),
             )
             .when_some(
                 row.state
@@ -1326,8 +1361,7 @@ impl LayoutsPanel {
 
         let panel = cx.entity().downgrade();
         right_click_menu(SharedString::from(format!(
-            "herdr-menu-{}-{}",
-            section.key(),
+            "herdr-menu-{key}-{}",
             row.address
         )))
         .trigger(move |_, _, _| element)
@@ -1375,76 +1409,42 @@ impl LayoutsPanel {
         .into_any_element()
     }
 
-    fn render_inventory(&self, rows: &[TerminalRow], cx: &mut Context<Self>) -> AnyElement {
-        let agents = rows
-            .iter()
-            .filter(|row| row.is_live && row.is_agent)
-            .collect::<Vec<_>>();
-        let terminals = rows
-            .iter()
-            .filter(|row| row.is_live && !row.is_agent)
-            .collect::<Vec<_>>();
-        let ended = rows.iter().filter(|row| !row.is_live).collect::<Vec<_>>();
-        let is_empty = rows.is_empty();
+    /// What reaches all of Herdr Core from the panel: the table of its
+    /// programs, and a new terminal.
+    fn render_herdr_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let is_connected = self.store.read(cx).is_connected();
-
-        v_flex()
+        h_flex()
             .w_full()
-            .px_1()
-            .gap_1p5()
+            .px_2p5()
+            .gap_1()
             .child(
-                h_flex()
-                    .w_full()
-                    .px_1p5()
-                    .gap_1()
-                    .child(
-                        Label::new("Herdr Core")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        IconButton::new("herdr-project-only", IconName::Filter)
-                            .aria_label("Show This Project Only")
-                            .icon_size(IconSize::Small)
-                            .shape(IconButtonShape::Square)
-                            .toggle_state(self.project_only)
-                            .tooltip(Tooltip::text(if self.project_only {
-                                "Showing this project and the tabs of this window. Show every machine and folder."
-                            } else {
-                                "Showing every machine and folder. Show this project only."
-                            }))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.project_only = !this.project_only;
-                                this.serialize(cx);
-                                cx.notify();
-                            })),
-                    )
-                    .when(is_connected, |header| {
-                        header.child(self.render_new_terminal_menu(cx))
-                    }),
+                Label::new("Herdr Core")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
             )
-            .children(self.render_section(Section::Agents, &agents, cx))
-            .children(self.render_section(Section::Terminals, &terminals, cx))
-            .children(self.render_section(Section::Ended, &ended, cx))
-            .when(is_empty && is_connected, |list| {
-                list.child(
-                    div().px_1p5().child(
-                        Label::new(if self.project_only {
-                            "Nothing runs in this project."
-                        } else {
-                            "Nothing runs in Herdr Core."
-                        })
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                    ),
-                )
+            .child(div().flex_1())
+            .child(
+                IconButton::new("herdr-processes", IconName::ListTree)
+                    .aria_label("All Programs of Herdr Core")
+                    .icon_size(IconSize::Small)
+                    .shape(IconButtonShape::Square)
+                    .tooltip(|_, cx| {
+                        Tooltip::for_action("All Programs of Herdr Core", &OpenProcesses, cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.update_workspace(window, cx, |workspace, window, cx| {
+                            open_processes(workspace, window, cx);
+                        });
+                    })),
+            )
+            .when(is_connected, |bar| {
+                bar.child(self.render_new_terminal_menu(cx))
             })
             .into_any_element()
     }
 
     fn render_new_terminal_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let targets = self.run_targets(cx);
+        let targets = run_targets(&self.project, &self.store, cx);
         let panel = cx.entity().downgrade();
         PopoverMenu::new("herdr-new-terminal")
             .trigger_with_tooltip(
@@ -1617,15 +1617,17 @@ impl LayoutsPanel {
 
     /// The narrow form of what the core runs: who needs a person, and how
     /// many, without names.
-    fn render_narrow_inventory(&self, rows: &[TerminalRow], cx: &mut Context<Self>) -> AnyElement {
-        let blocked = rows
-            .iter()
-            .filter(|row| row.is_live && row.state == Some(AgentState::Blocked))
-            .count();
-        let working = rows
-            .iter()
-            .filter(|row| row.is_live && row.state == Some(AgentState::Working))
-            .count();
+    fn render_narrow_inventory(&self, cx: &mut Context<Self>) -> AnyElement {
+        let store = self.store.read(cx);
+        let count = |state| {
+            store
+                .terminals()
+                .into_iter()
+                .filter(|record| record.is_live() && record.agent_state() == Some(state))
+                .count()
+        };
+        let blocked = count(AgentState::Blocked);
+        let working = count(AgentState::Working);
         let tooltip = format!(
             "{} · {}",
             if blocked == 1 {
@@ -1677,11 +1679,221 @@ impl LayoutsPanel {
     }
 }
 
-/// Whether a terminal runs in one of the folders of a project.
-fn runs_in(record: &TerminalRecord, roots: &[String]) -> bool {
-    roots
+fn layout_key(layout: LayoutId) -> String {
+    format!("{layout:?}")
+}
+
+fn terminal_row(record: &TerminalRecord, is_live: bool) -> TerminalRow {
+    let name = record.display_name();
+    let detail = if record.program() != name {
+        record.program().to_string()
+    } else {
+        String::new()
+    };
+    let mut tooltip = vec![
+        format!("{} · {}", record.address, record.program()),
+        record.current_folder().to_string(),
+    ];
+    if let Some(message) = record
+        .status
+        .as_ref()
+        .and_then(|status| status.msg.as_deref())
+        .filter(|message| !message.is_empty())
+    {
+        tooltip.push(message.to_string());
+    }
+    TerminalRow {
+        address: record.address.clone().into(),
+        name: name.into(),
+        detail: detail.into(),
+        tooltip: tooltip.join("\n").into(),
+        state: record.agent_state(),
+        is_agent: is_agent(record),
+        is_live: is_live && record.is_live(),
+    }
+}
+
+/// The Herdr machine of a project: `None` for a local project, the machine
+/// named as the SSH host of a remote one. A remote project that no machine
+/// of the core reaches has no place in Herdr.
+fn project_machine(project: &Project, store: &HerdrStore, cx: &App) -> Option<Option<String>> {
+    let Some(options) = project.remote_connection_options(cx) else {
+        return Some(None);
+    };
+    let RemoteConnectionOptions::Ssh(options) = options else {
+        return None;
+    };
+    let host = options.host.to_string();
+    store
+        .machines()
         .iter()
-        .any(|root| is_within(record.current_folder(), root) || is_within(&record.cwd, root))
+        .find(|machine| {
+            machine.name.eq_ignore_ascii_case(&host) || machine.host.eq_ignore_ascii_case(&host)
+        })
+        .map(|machine| Some(machine.name.clone()))
+}
+
+/// The folders of the project of a window, with their Herdr machine.
+fn project_roots(
+    project: &Entity<Project>,
+    store: &Entity<HerdrStore>,
+    cx: &App,
+) -> Vec<(Option<String>, String)> {
+    let project = project.read(cx);
+    let Some(machine) = project_machine(project, store.read(cx), cx) else {
+        return Vec::new();
+    };
+    project
+        .visible_worktrees(cx)
+        .map(|worktree| {
+            (
+                machine.clone(),
+                worktree.read(cx).abs_path().to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Where a terminal of the window starts unless the person says otherwise:
+/// in the first folder of its project, on the machine of the project.
+fn default_target(project: &Entity<Project>, store: &Entity<HerdrStore>, cx: &App) -> RunTarget {
+    match project_roots(project, store, cx).into_iter().next() {
+        Some((machine, folder)) => RunTarget {
+            label: place_label(machine.as_deref(), Some(&folder)),
+            machine,
+            folder: Some(folder),
+        },
+        None => RunTarget {
+            machine: None,
+            folder: None,
+            label: place_label(None, None),
+        },
+    }
+}
+
+fn place_label(machine: Option<&str>, folder: Option<&String>) -> SharedString {
+    let machine = machine.unwrap_or("This machine");
+    match folder {
+        Some(folder) => format!("{machine} · {}", short_folder(folder)).into(),
+        None => format!("{machine} · home folder").into(),
+    }
+}
+
+/// Every place the panel offers to start a terminal: the place of the
+/// project first, then the home folder of each machine.
+fn run_targets(project: &Entity<Project>, store: &Entity<HerdrStore>, cx: &App) -> Vec<RunTarget> {
+    let default = default_target(project, store, cx);
+    let mut targets = vec![default.clone()];
+    let machines = std::iter::once(None).chain(
+        store
+            .read(cx)
+            .machines()
+            .iter()
+            .filter(|machine| machine.is_connected())
+            .map(|machine| Some(machine.name.clone())),
+    );
+    for machine in machines {
+        if default.folder.is_some() || default.machine != machine {
+            targets.push(RunTarget {
+                label: place_label(machine.as_deref(), None),
+                machine,
+                folder: None,
+            });
+        }
+    }
+    targets
+}
+
+/// Starts a shell, or `line` in a shell, where `target` says, and opens its
+/// tab in the layout on screen.
+fn run_in_herdr(
+    workspace: WeakEntity<Workspace>,
+    target: &RunTarget,
+    line: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<Result<()>> {
+    let store = HerdrStore::global(cx);
+    let run = store.read(cx).run(
+        RunParams {
+            line,
+            cwd: target.folder.clone(),
+            on: target.machine.clone(),
+            no_parent: true,
+            no_notify: true,
+            ..RunParams::default()
+        },
+        cx,
+    );
+    window.spawn(cx, async move |cx| {
+        let record = run.await?;
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_herdr_terminal(workspace, &record.address, window, cx);
+        })
+    })
+}
+
+fn new_herdr_terminal(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let store = HerdrStore::global(cx);
+    let target = default_target(workspace.project(), &store, cx);
+    let weak_workspace = cx.entity().downgrade();
+    run_in_herdr(weak_workspace.clone(), &target, None, window, cx).detach_and_notify_err(
+        weak_workspace,
+        window,
+        cx,
+    );
+}
+
+fn open_in_new_layout(
+    workspace: &mut Workspace,
+    address: &str,
+    name: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let layout = new_layout(workspace, window, cx);
+    workspace.rename_layout(layout, name.to_string(), window, cx);
+    let weak_workspace = cx.entity().downgrade();
+    let workspace_id = workspace.database_id();
+    let project = workspace.project().downgrade();
+    let address = SharedString::from(address.to_string());
+    let item =
+        cx.new(|cx| HerdrTerminal::new(address, weak_workspace, workspace_id, project, window, cx));
+    workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+}
+
+/// Ends a program once the person confirms it.
+fn end_program(
+    store: &Entity<HerdrStore>,
+    address: &str,
+    name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<Result<()>> {
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        &format!("End the program of “{name}”?"),
+        Some("Herdr Core hangs up on it, then terminates it. What it did not save is lost."),
+        &["End Program", "Cancel"],
+        cx,
+    );
+    let store = store.clone();
+    let address = address.to_string();
+    cx.spawn(async move |cx| {
+        if answer.await != Ok(0) {
+            return Ok(());
+        }
+        store
+            .read_with(cx, |store, cx| store.kill(&address, cx))
+            .await
+    })
+}
+
+/// Opens a table of every program of Herdr Core in the pane on screen.
+fn open_processes(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let weak_workspace = cx.entity().downgrade();
+    let item = cx.new(|cx| HerdrProcesses::new(weak_workspace, ProcessView::default(), window, cx));
+    workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
 }
 
 fn is_within(folder: &str, root: &str) -> bool {
@@ -1689,6 +1901,99 @@ fn is_within(folder: &str, root: &str) -> bool {
     match folder.strip_prefix(root) {
         Some(rest) => rest.is_empty() || rest.starts_with(['/', '\\']),
         None => false,
+    }
+}
+
+/// The space before a line of the panel at `depth` in its tree.
+fn indent(depth: usize) -> Pixels {
+    px(6. + 12. * depth as f32)
+}
+
+/// Where a terminal works: a workspace, the folder with a Git repository at
+/// its root, and its worktree when not the main one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct Place {
+    /// `None` for the machine of the core this window talks to.
+    pub(crate) machine: Option<String>,
+    pub(crate) workspace: String,
+    pub(crate) worktree: Option<String>,
+}
+
+/// Herdr Core does not say where the repositories are. A folder under
+/// `.worktrees/` is a worktree of the folder above it; any other folder
+/// belongs to the deepest of `roots` on its machine that holds it, or is its
+/// own workspace.
+pub(crate) fn place_of(
+    machine: Option<&str>,
+    folder: &str,
+    roots: &[(Option<String>, String)],
+) -> Place {
+    let machine = machine.map(str::to_string);
+    let folder = folder.trim_end_matches(['/', '\\']);
+    for separator in ["/.worktrees/", "\\.worktrees\\"] {
+        if let Some((workspace, rest)) = folder.split_once(separator) {
+            let worktree = rest.split(['/', '\\']).next().unwrap_or(rest);
+            return Place {
+                machine,
+                workspace: workspace.to_string(),
+                worktree: Some(worktree.to_string()),
+            };
+        }
+    }
+    let workspace = roots
+        .iter()
+        .filter(|(root_machine, root)| *root_machine == machine && is_within(folder, root))
+        .map(|(_, root)| root.trim_end_matches(['/', '\\']))
+        .max_by_key(|root| root.len())
+        .unwrap_or(folder)
+        .to_string();
+    Place {
+        machine,
+        workspace,
+        worktree: None,
+    }
+}
+
+/// The name a folder goes by: its last name, or `~` for a home folder.
+pub(crate) fn folder_name(folder: &str) -> String {
+    folder_components(folder)
+        .last()
+        .cloned()
+        .unwrap_or_else(|| folder.to_string())
+}
+
+/// A folder as a person reads it: `~/…` for what is in a home folder.
+pub(crate) fn display_folder(folder: &str) -> String {
+    let components = folder_components(folder);
+    match components.split_first() {
+        Some((first, rest)) if first == "/" => format!("/{}", rest.join("/")),
+        Some(_) => components.join("/"),
+        None => folder.to_string(),
+    }
+}
+
+/// The names of a folder from the root of its machine. A home folder shows
+/// as `~`, on any machine: its owner is the person who reads the list.
+fn folder_components(folder: &str) -> Vec<String> {
+    let trimmed = folder.trim_end_matches(['/', '\\']);
+    let names = trimmed
+        .split(['/', '\\'])
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    let is_unix = trimmed.starts_with('/');
+    let is_windows = trimmed.as_bytes().get(1) == Some(&b':');
+    let home = |rest: &[&str]| {
+        std::iter::once("~".to_string())
+            .chain(rest.iter().map(|name| name.to_string()))
+            .collect()
+    };
+    match names.as_slice() {
+        ["home" | "Users", _, rest @ ..] if is_unix => home(rest),
+        [_, users, _, rest @ ..] if is_windows && users.eq_ignore_ascii_case("users") => home(rest),
+        _ if is_unix => std::iter::once("/".to_string())
+            .chain(names.iter().map(|name| name.to_string()))
+            .collect(),
+        _ => names.iter().map(|name| name.to_string()).collect(),
     }
 }
 
@@ -1716,12 +2021,12 @@ impl Render for LayoutsPanel {
         let Some(workspace) = self.workspace.upgrade() else {
             return div().into_any_element();
         };
-        let (narrow, layouts, rows) = {
+        let roots = project_roots(&self.project, &self.store, cx);
+        let (narrow, layouts) = {
             let workspace = workspace.read(cx);
             (
                 self.width(workspace, cx) < NARROW_LIMIT,
-                self.layout_summaries(workspace, cx),
-                self.terminal_rows(workspace, cx),
+                self.layout_summaries(workspace, &roots, cx),
             )
         };
 
@@ -1746,9 +2051,9 @@ impl Render for LayoutsPanel {
                     .child(self.render_layouts(&layouts, narrow, cx))
                     .child(div().mx_2().h_px().bg(cx.theme().colors().border_variant))
                     .child(if narrow {
-                        self.render_narrow_inventory(&rows, cx)
+                        self.render_narrow_inventory(cx)
                     } else {
-                        self.render_inventory(&rows, cx)
+                        self.render_herdr_bar(cx)
                     }),
             )
             .when(!narrow, |panel| {
@@ -2087,6 +2392,44 @@ mod tests {
         assert!(!is_within("/home/ada/acme-web", "/home/ada/acme"));
         assert!(!is_within("/home/ada", "/home/ada/acme"));
         assert!(is_within("C:\\work\\acme\\src", "C:\\work\\acme"));
+    }
+
+    #[test]
+    fn a_home_folder_shows_as_a_tilde_on_any_machine() {
+        assert_eq!(folder_components("/home/ada/acme/"), ["~", "acme"]);
+        assert_eq!(folder_components("/Users/ada"), ["~"]);
+        assert_eq!(folder_components("C:\\Users\\Ada\\acme"), ["~", "acme"]);
+        assert_eq!(folder_components("/opt/tools"), ["/", "opt", "tools"]);
+        assert!(folder_components("").is_empty());
+    }
+
+    #[test]
+    fn a_terminal_works_in_the_worktree_of_its_folder() {
+        let roots = [(None, "/home/ada/acme".to_string())];
+        let place = place_of(None, "/home/ada/acme/.worktrees/fix/src", &roots);
+        assert_eq!(place.workspace, "/home/ada/acme");
+        assert_eq!(place.worktree.as_deref(), Some("fix"));
+
+        let place = place_of(None, "/home/ada/acme/crates/core", &roots);
+        assert_eq!(place.workspace, "/home/ada/acme");
+        assert_eq!(place.worktree, None);
+
+        // The folder of the project on this machine says nothing of a
+        // folder of the same name on another machine.
+        let place = place_of(Some("dgx"), "/home/ada/acme/crates", &roots);
+        assert_eq!(place.workspace, "/home/ada/acme/crates");
+
+        let place = place_of(None, "C:\\work\\acme\\.worktrees\\fix", &[]);
+        assert_eq!(place.workspace, "C:\\work\\acme");
+        assert_eq!(place.worktree.as_deref(), Some("fix"));
+    }
+
+    #[test]
+    fn a_folder_reads_from_the_home_folder() {
+        assert_eq!(display_folder("/home/ada/acme/"), "~/acme");
+        assert_eq!(display_folder("/opt/tools"), "/opt/tools");
+        assert_eq!(folder_name("/home/ada"), "~");
+        assert_eq!(folder_name("C:\\Users\\Ada\\acme"), "acme");
     }
 
     #[test]

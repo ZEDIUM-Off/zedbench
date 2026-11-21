@@ -1121,6 +1121,37 @@ impl Dock {
         }
     }
 
+    /// Resizes one panel, whether it is the active one or not, and leaves the
+    /// others as they are.
+    pub fn resize_panel(
+        &mut self,
+        panel: &dyn PanelHandle,
+        size: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let position = self.position;
+        let panel_id = panel.panel_id();
+        let Some(entry) = self
+            .panel_entries
+            .iter_mut()
+            .find(|entry| entry.panel.panel_id() == panel_id)
+        else {
+            return;
+        };
+        let flex = entry.size_state.flex;
+        let (panel_key, size_state) = resize_panel_entry(position, entry, size, flex, window, cx);
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            if let Some(workspace) = workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.persist_panel_size_state(panel_key, size_state, cx);
+                });
+            }
+        });
+        cx.notify();
+    }
+
     /// Resizes the active panel and, when this dock is included in
     /// `resize_all_panels_in_dock`, all panels using the same sizing mode.
     pub fn resize_panel_sizes(

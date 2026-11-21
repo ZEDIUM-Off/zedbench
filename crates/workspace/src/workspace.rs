@@ -4,6 +4,7 @@ pub mod history_manager;
 mod in_place_preview;
 pub mod invalid_item_view;
 pub mod item;
+mod layouts;
 mod modal_layer;
 mod multi_workspace;
 #[cfg(test)]
@@ -76,6 +77,7 @@ pub use item::{
 };
 use itertools::Itertools;
 use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
+pub use layouts::{Layout, LayoutId, LayoutOutline};
 pub use modal_layer::*;
 use node_runtime::NodeRuntime;
 use notifications::{
@@ -1603,6 +1605,8 @@ pub enum Event {
     Activate,
     PanelAdded(AnyView),
     WorktreeCreationChanged,
+    /// A layout was added, removed, renamed or shown.
+    LayoutsChanged,
 }
 
 /// Controls which types of items should be made visible in the project panel
@@ -1680,6 +1684,7 @@ pub struct Workspace {
     zoomed_position: Option<DockPosition>,
     maximized_pane: Option<WeakEntity<Pane>>,
     center: PaneGroup,
+    layouts: layouts::Layouts,
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
@@ -2189,6 +2194,7 @@ impl Workspace {
             maximized_pane: None,
             previous_dock_drag_coordinates: None,
             center,
+            layouts: layouts::Layouts::new(),
             panes: vec![center_pane.clone()],
             panes_by_item: Default::default(),
             active_pane: center_pane.clone(),
@@ -4724,7 +4730,7 @@ impl Workspace {
             tasks.push(current_pane_close);
         }
 
-        for pane in self.panes() {
+        for pane in &self.shown_panes() {
             if retain_active_pane && pane.entity_id() == current_pane.entity_id() {
                 continue;
             }
@@ -5305,12 +5311,9 @@ impl Workspace {
     ) -> Task<anyhow::Result<Box<dyn ItemHandle>>> {
         let reveal_if_open = pane.is_none() && WorkspaceSettings::get_global(cx).reveal_if_open;
         let requested_pane = pane.unwrap_or_else(|| {
-            self.last_active_center_pane.clone().unwrap_or_else(|| {
-                self.panes
-                    .first()
-                    .expect("There must be an active pane")
-                    .downgrade()
-            })
+            self.last_active_center_pane
+                .clone()
+                .unwrap_or_else(|| self.center.first_pane().downgrade())
         });
 
         let workspace = self.weak_self.clone();
@@ -5380,13 +5383,11 @@ impl Workspace {
             return Some(requested_pane.clone());
         }
 
-        self.panes.iter().find_map(|pane| {
-            if requested_pane.as_ref() == Some(pane) || !pane_contains_project_item(pane) {
-                None
-            } else {
-                Some(pane.clone())
-            }
-        })
+        // A layout is its own arrangement: a file open in another layout
+        // opens here too instead of taking the person there.
+        self.shown_panes()
+            .into_iter()
+            .find(|pane| requested_pane.as_ref() != Some(pane) && pane_contains_project_item(pane))
     }
 
     /// Opens a URL or file path, intelligently routing to the appropriate handler:
@@ -5514,12 +5515,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<Box<dyn ItemHandle>>> {
-        let pane = self.last_active_center_pane.clone().unwrap_or_else(|| {
-            self.panes
-                .first()
-                .expect("There must be an active pane")
-                .downgrade()
-        });
+        let pane = self
+            .last_active_center_pane
+            .clone()
+            .unwrap_or_else(|| self.center.first_pane().downgrade());
 
         if let Member::Pane(center_pane) = &self.center.root
             && center_pane.read(cx).items_len() == 0
@@ -5719,11 +5718,11 @@ impl Workspace {
             .map(|item| (requested_pane.clone(), item))
             .or_else(|| {
                 if reveal_if_open {
-                    self.panes.iter().find_map(|pane| {
-                        if pane == &requested_pane {
+                    self.shown_panes().into_iter().find_map(|pane| {
+                        if pane == requested_pane {
                             None
                         } else {
-                            self.find_project_item(pane, &project_item, cx)
+                            self.find_project_item(&pane, &project_item, cx)
                                 .map(|item| (pane.clone(), item))
                         }
                     })
@@ -6040,12 +6039,7 @@ impl Workspace {
             let pane = self
                 .last_active_center_pane
                 .clone()
-                .unwrap_or_else(|| {
-                    self.panes
-                        .first()
-                        .expect("There must be an active pane")
-                        .downgrade()
-                })
+                .unwrap_or_else(|| self.center.first_pane().downgrade())
                 .upgrade()?;
             (pane.read(cx).items_len() != 0).then_some(pane)
         };
@@ -6440,7 +6434,9 @@ impl Workspace {
                 self.join_all_panes(window, cx);
             }
             pane::Event::Remove { focus_on_pane } => {
-                self.remove_pane(pane.clone(), focus_on_pane.clone(), window, cx);
+                if !self.remove_parked_pane(pane, cx) {
+                    self.remove_pane(pane.clone(), focus_on_pane.clone(), window, cx);
+                }
             }
             pane::Event::ActivateItem {
                 local,
@@ -6459,7 +6455,15 @@ impl Workspace {
                     self.active_item_path_changed(*focus_changed, window, cx);
                     self.update_active_view_for_followers(window, cx);
                 } else if *local {
-                    self.set_active_pane(pane, window, cx);
+                    match self.layout_for_pane(pane) {
+                        // Someone asked for a tab of a layout the window does
+                        // not show: the tab switcher, a jump to a definition.
+                        Some(layout) if layout != self.active_layout() => {
+                            self.set_parked_active_pane(pane);
+                            self.activate_layout(layout, window, cx);
+                        }
+                        _ => self.set_active_pane(pane, window, cx),
+                    }
                 }
             }
             pane::Event::UserSavedItem { item, save_intent } => {
@@ -6612,7 +6616,7 @@ impl Workspace {
 
     pub fn join_all_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_item = self.active_pane.read(cx).active_item();
-        for pane in &self.panes {
+        for pane in &self.shown_panes() {
             join_pane_into_active(&self.active_pane, pane, window, cx);
         }
         if let Some(active_item) = active_item {
@@ -8013,7 +8017,14 @@ impl Workspace {
             }
             focus_on.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
         } else if removing_active_pane {
-            let fallback_pane = self.panes.last().unwrap().clone();
+            let fallback_pane = self
+                .panes
+                .iter()
+                .rev()
+                .find(|pane| !self.is_parked_pane(pane))
+                .or(self.panes.last())
+                .unwrap()
+                .clone();
             self.set_active_pane(&fallback_pane, window, cx);
             if !self.has_active_modal(window, cx) {
                 fallback_pane.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
@@ -8128,9 +8139,12 @@ impl Workspace {
                     recent_navigation_history,
                 };
 
+                let save_layouts =
+                    self.save_layouts(database_id, &serialized_workspace.paths, window, cx);
                 let db = WorkspaceDb::global(cx);
                 let kvp = db::kvp::KeyValueStore::global(cx);
                 cx.background_spawn(async move {
+                    save_layouts.await;
                     if let Some(docks) = default_docks {
                         persistence::write_default_dock_state(&kvp, docks)
                             .await
@@ -8241,9 +8255,37 @@ impl Workspace {
             let mut center_group = None;
             let mut center_items = None;
 
+            let saved_layouts = cx.update(|_, cx| {
+                layouts::read_saved_layouts(
+                    serialized_workspace.id,
+                    &serialized_workspace.paths,
+                    cx,
+                )
+            })?;
+            // The saved layouts hold the tree of the one the window showed,
+            // written in the same step as the others.
+            let serialized_center = saved_layouts
+                .as_ref()
+                .and_then(|saved| saved.active_center())
+                .unwrap_or(serialized_workspace.center_group);
+            // The other layouts load first, so that focus ends on a pane of
+            // the layout the window shows.
+            let mut loaded_layouts = match saved_layouts {
+                Some(saved) => {
+                    Workspace::load_parked_layouts(
+                        saved,
+                        &workspace,
+                        &project,
+                        serialized_workspace.id,
+                        cx,
+                    )
+                    .await
+                }
+                None => None,
+            };
+
             // Traverse the splits tree and add to things
-            if let Some((group, active_pane, items)) = serialized_workspace
-                .center_group
+            if let Some((group, active_pane, items)) = serialized_center
                 .deserialize(&project, serialized_workspace.id, workspace.clone(), cx)
                 .await
             {
@@ -8252,7 +8294,10 @@ impl Workspace {
             }
 
             let mut items_by_project_path = HashMap::default();
-            let mut item_ids_by_kind = HashMap::default();
+            let mut item_ids_by_kind = loaded_layouts
+                .as_mut()
+                .map(|loaded| std::mem::take(&mut loaded.item_ids_by_kind))
+                .unwrap_or_default();
             let mut all_deserialized_items = Vec::default();
             cx.update(|_, cx| {
                 for item in center_items.unwrap_or_default().into_iter().flatten() {
@@ -8280,6 +8325,9 @@ impl Workspace {
 
             // Remove old panes from workspace panes list
             workspace.update_in(cx, |workspace, window, cx| {
+                if let Some(loaded_layouts) = loaded_layouts {
+                    workspace.restore_layouts(loaded_layouts, cx);
+                }
                 if let Some((center_group, active_pane)) = center_group {
                     workspace.remove_panes(workspace.center.root.clone(), window, cx);
 
@@ -8294,6 +8342,12 @@ impl Workspace {
                     } else {
                         workspace.set_active_pane(&workspace.center.first_pane(), window, cx);
                     }
+                }
+
+                if workspace.is_parked_pane(&workspace.active_pane) {
+                    let pane = workspace.center.first_pane();
+                    workspace.set_active_pane(&pane, window, cx);
+                    window.focus(&pane.focus_handle(cx), cx);
                 }
 
                 let docks = serialized_workspace.docks;

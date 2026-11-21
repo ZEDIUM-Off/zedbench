@@ -1029,6 +1029,7 @@ impl TerminalBuilder {
             task: None,
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
+            connection: None,
             completion_tx: None,
             term,
             term_config: config,
@@ -1090,6 +1091,35 @@ impl TerminalBuilder {
             terminal,
             events_rx,
         }
+    }
+
+    /// A terminal for a program that runs elsewhere: `connection` receives
+    /// what the viewer types, and the caller writes the output of the program
+    /// with [`Terminal::write_raw_output`].
+    pub fn new_connected(
+        connection: Arc<dyn TerminalConnection>,
+        cursor_shape: SettingsCursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        window_id: u64,
+        background_executor: &BackgroundExecutor,
+        path_style: PathStyle,
+    ) -> TerminalBuilder {
+        let mut builder = Self::new_display_only(
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            window_id,
+            background_executor,
+            path_style,
+        );
+        // A display-only terminal refuses what only a live program can ask for,
+        // such as writing to the clipboard.
+        builder.terminal.term_config =
+            pty_term_config(builder.terminal.term_config.scrolling_history, cursor_shape);
+        apply_config(&builder.terminal.term, &builder.terminal.term_config);
+        builder.terminal.connection = Some(connection);
+        builder
     }
 
     pub fn new(
@@ -1319,6 +1349,7 @@ impl TerminalBuilder {
                 task,
                 terminal_type,
                 subprocess,
+                connection: None,
                 completion_tx,
                 term,
                 term_config: config,
@@ -1511,6 +1542,19 @@ enum PtyResources {
     Released,
 }
 
+/// The program of a terminal that runs outside of this process, for example
+/// in a Herdr Core. The terminal shows what that program prints (see
+/// [`Terminal::write_raw_output`]) and sends here what its viewer produces.
+pub trait TerminalConnection: Send + Sync {
+    /// Keys, pasted text and mouse reports of the person at the terminal.
+    fn input(&self, bytes: Cow<'static, [u8]>);
+    /// An answer of the emulator to a query of the program. It is not
+    /// activity of a person.
+    fn automatic_reply(&self, bytes: Cow<'static, [u8]>);
+    fn resize(&self, columns: u16, rows: u16);
+    fn focus_changed(&self, focused: bool);
+}
+
 enum TerminalType {
     Pty {
         resources: PtyResources,
@@ -1524,6 +1568,8 @@ pub struct Terminal {
     /// Set for non-PTY terminals (see [`HeadlessTerminal`]); owns the spawned
     /// subprocess and the task pumping its output into the grid.
     subprocess: Option<SubprocessHandle>,
+    /// Set for a display-only terminal whose program runs elsewhere.
+    connection: Option<Arc<dyn TerminalConnection>>,
     completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<AlacrittyTermLock>,
     term_config: AlacrittyTermConfig,
@@ -1673,7 +1719,7 @@ impl Terminal {
                 cx.write_to_clipboard(ClipboardItem::new_string(data))
             }
             TerminalBackendEvent::ClipboardLoad(format) => {
-                self.write_to_pty(
+                self.write_reply_to_pty(
                     match &cx.read_from_clipboard().and_then(|item| item.text()) {
                         // The terminal only supports pasting strings, not images.
                         Some(text) => format(text),
@@ -1682,9 +1728,9 @@ impl Terminal {
                     .into_bytes(),
                 )
             }
-            TerminalBackendEvent::PtyWrite(out) => self.write_to_pty(out.into_bytes()),
+            TerminalBackendEvent::PtyWrite(out) => self.write_reply_to_pty(out.into_bytes()),
             TerminalBackendEvent::TextAreaSizeRequest(format) => {
-                self.write_to_pty(format(self.last_content.terminal_bounds).into_bytes())
+                self.write_reply_to_pty(format(self.last_content.terminal_bounds).into_bytes())
             }
             TerminalBackendEvent::CursorBlinkingChange => {
                 let terminal = self.term.lock();
@@ -1718,7 +1764,7 @@ impl Terminal {
 
                 let color = self.term.lock().colors()[index]
                     .unwrap_or_else(|| to_vte_rgb(get_color_at_index(index, cx.theme().as_ref())));
-                self.write_to_pty(format(color).into_bytes());
+                self.write_reply_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
                 self.register_task_finished(Some(exit_status), cx);
@@ -1752,6 +1798,12 @@ impl Terminal {
                 } = &self.terminal_type
                 {
                     pty_tx.resize(new_bounds);
+                }
+                if let Some(connection) = &self.connection {
+                    connection.resize(
+                        u16::try_from(new_bounds.num_columns()).unwrap_or(u16::MAX),
+                        u16::try_from(new_bounds.num_lines()).unwrap_or(u16::MAX),
+                    );
                 }
 
                 resize(term, new_bounds);
@@ -2198,6 +2250,10 @@ impl Terminal {
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
         self.pty_write_log.borrow_mut().push(input.to_vec());
+        if let Some(connection) = &self.connection {
+            connection.input(input);
+            return;
+        }
         if let TerminalType::Pty {
             resources: PtyResources::Active(pty_tx),
             ..
@@ -2211,6 +2267,27 @@ impl Terminal {
                 }
             }
             pty_tx.notify(input);
+        }
+    }
+
+    /// Writes an answer of the emulator to a query of the program.
+    fn write_reply_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
+        match &self.connection {
+            Some(connection) => {
+                let input = input.into();
+                #[cfg(any(test, feature = "test-support"))]
+                self.pty_write_log.borrow_mut().push(input.to_vec());
+                connection.automatic_reply(input);
+            }
+            None => self.write_to_pty(input),
+        }
+    }
+
+    /// The name the terminal shows instead of what its program reports.
+    pub fn set_title_override(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        if self.title_override != title {
+            self.title_override = title;
+            cx.emit(Event::TitleChanged);
         }
     }
 
@@ -2533,13 +2610,18 @@ impl Terminal {
     }
 
     pub fn focus_in(&self) {
-        if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
+        if let Some(connection) = &self.connection {
+            // The other end decides whether its program asked for focus reports.
+            connection.focus_changed(true);
+        } else if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
             self.write_to_pty("\x1b[I".as_bytes());
         }
     }
 
     pub fn focus_out(&mut self) {
-        if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
+        if let Some(connection) = &self.connection {
+            connection.focus_changed(false);
+        } else if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
             self.write_to_pty("\x1b[O".as_bytes());
         }
     }

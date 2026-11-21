@@ -5,10 +5,10 @@
 //! that arranges them is swapped.
 
 use crate::{
-    Event, Member, Pane, PaneGroup, Workspace, WorkspaceId, pane,
+    Event, Member, Pane, PaneGroup, Workspace, WorkspaceDb, WorkspaceId, pane,
     persistence::{
         SerializedAxis,
-        model::{SerializedItem, SerializedPane, SerializedPaneGroup},
+        model::{SerializedItem, SerializedPane, SerializedPaneGroup, SerializedWorkspaceLocation},
     },
     serialize_pane_handle,
 };
@@ -19,6 +19,7 @@ use gpui::{
     SharedString, Task, WeakEntity, Window,
 };
 use project::Project;
+use remote::RemoteConnectionOptions;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use util::{ResultExt as _, path_list::PathList};
@@ -29,11 +30,21 @@ const FIRST_LAYOUT_NAME: &str = "Main";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LayoutId(u64);
 
+/// Where the tabs a layout opens start: the folder new terminals run in,
+/// and the workspace its overview shows. A layout without one is global.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LayoutScope {
+    /// The Herdr machine; `None` for this one.
+    pub machine: Option<String>,
+    pub folder: String,
+}
+
 pub struct Layout {
     id: LayoutId,
     name: SharedString,
     /// The group the layout is listed under. Empty: no group.
     group: SharedString,
+    scope: Option<LayoutScope>,
     /// `None` for the layout the window shows: its tree is `Workspace::center`.
     parked: Option<ParkedLayout>,
 }
@@ -55,6 +66,10 @@ impl Layout {
 
     pub fn group(&self) -> &SharedString {
         &self.group
+    }
+
+    pub fn scope(&self) -> Option<&LayoutScope> {
+        self.scope.as_ref()
     }
 }
 
@@ -83,6 +98,7 @@ impl Layouts {
                 id: LayoutId(1),
                 name: FIRST_LAYOUT_NAME.into(),
                 group: SharedString::default(),
+                scope: None,
                 parked: None,
             }],
             active: LayoutId(1),
@@ -119,6 +135,15 @@ impl Workspace {
 
     pub fn active_layout(&self) -> LayoutId {
         self.layouts.active
+    }
+
+    pub fn layout(&self, id: LayoutId) -> Option<&Layout> {
+        self.layouts.layouts.iter().find(|layout| layout.id == id)
+    }
+
+    /// The scope of the layout on screen; `None` when it is global.
+    pub fn active_layout_scope(&self) -> Option<&LayoutScope> {
+        self.layout(self.layouts.active)?.scope.as_ref()
     }
 
     /// The tree of panes of a layout.
@@ -232,6 +257,7 @@ impl Workspace {
             id,
             name: name.into(),
             group: group.into(),
+            scope: None,
             parked: Some(ParkedLayout {
                 center,
                 active_pane: pane,
@@ -368,6 +394,28 @@ impl Workspace {
             && layout.group != group
         {
             layout.group = group;
+            self.layouts.customized = true;
+            cx.emit(Event::LayoutsChanged);
+            self.serialize_workspace(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub fn set_layout_scope(
+        &mut self,
+        id: LayoutId,
+        scope: Option<LayoutScope>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(layout) = self
+            .layouts
+            .layouts
+            .iter_mut()
+            .find(|layout| layout.id == id)
+            && layout.scope != scope
+        {
+            layout.scope = scope;
             self.layouts.customized = true;
             cx.emit(Event::LayoutsChanged);
             self.serialize_workspace(window, cx);
@@ -552,6 +600,7 @@ impl Workspace {
                         id: layout.id,
                         name: layout.name.to_string(),
                         group: layout.group.to_string(),
+                        scope: layout.scope.clone(),
                         center: serialize_member(root, active_pane, window, cx),
                     }
                 })
@@ -586,9 +635,13 @@ impl Workspace {
         };
         for layout in saved.layouts {
             if layout.id == saved.active {
-                loaded
-                    .layouts
-                    .push((layout.id, layout.name, layout.group, None));
+                loaded.layouts.push(LoadedLayout {
+                    id: layout.id,
+                    name: layout.name,
+                    group: layout.group,
+                    scope: layout.scope,
+                    center: None,
+                });
                 continue;
             }
             let deserialized = layout
@@ -620,9 +673,13 @@ impl Workspace {
                     (Member::Pane(pane), None)
                 }
             };
-            loaded
-                .layouts
-                .push((layout.id, layout.name, layout.group, Some(center)));
+            loaded.layouts.push(LoadedLayout {
+                id: layout.id,
+                name: layout.name,
+                group: layout.group,
+                scope: layout.scope,
+                center: Some(center),
+            });
         }
         Some(loaded)
     }
@@ -640,11 +697,12 @@ impl Workspace {
         let layouts = loaded
             .layouts
             .into_iter()
-            .map(|(id, name, group, center)| Layout {
-                id,
-                name: name.into(),
-                group: group.into(),
-                parked: center.map(|(root, active_pane)| {
+            .map(|loaded| Layout {
+                id: loaded.id,
+                name: loaded.name.into(),
+                group: loaded.group.into(),
+                scope: loaded.scope,
+                parked: loaded.center.map(|(root, active_pane)| {
                     let mut center = PaneGroup::with_root(root);
                     center.set_is_center(true);
                     let active_pane = active_pane.unwrap_or_else(|| center.first_pane());
@@ -670,14 +728,104 @@ impl Workspace {
 pub(crate) struct LoadedLayouts {
     active: LayoutId,
     next_id: u64,
-    layouts: Vec<(
-        LayoutId,
-        String,
-        String,
-        Option<(Member, Option<Entity<Pane>>)>,
-    )>,
+    layouts: Vec<LoadedLayout>,
     /// The items of the loaded layouts, which the database must keep.
     pub(crate) item_ids_by_kind: HashMap<&'static str, Vec<crate::ItemId>>,
+}
+
+struct LoadedLayout {
+    id: LayoutId,
+    name: String,
+    group: String,
+    scope: Option<LayoutScope>,
+    center: Option<(Member, Option<Entity<Pane>>)>,
+}
+
+/// The layouts a workspace saved, read without opening it.
+pub struct SavedWorkspaceLayouts {
+    pub workspace_id: WorkspaceId,
+    pub paths: PathList,
+    pub remote: Option<RemoteConnectionOptions>,
+    pub active: LayoutId,
+    pub layouts: Vec<SavedLayoutInfo>,
+}
+
+pub struct SavedLayoutInfo {
+    pub id: LayoutId,
+    pub name: SharedString,
+    pub group: SharedString,
+    pub scope: Option<LayoutScope>,
+}
+
+/// Every layout saved by any workspace, so that a window lists the layouts
+/// of the workspaces it does not hold.
+pub fn saved_layout_catalog(cx: &App) -> Task<Vec<SavedWorkspaceLayouts>> {
+    let kvp = db::kvp::KeyValueStore::global(cx);
+    let db = WorkspaceDb::global(cx);
+    cx.background_spawn(async move {
+        let Some(entries) = kvp.scoped(LAYOUTS_NAMESPACE).read_all().log_err() else {
+            return Vec::new();
+        };
+        let mut catalog = Vec::new();
+        for (key, json) in entries {
+            let Some(id) = key.parse::<i64>().ok().map(WorkspaceId::from_i64) else {
+                continue;
+            };
+            let Some(saved) = serde_json::from_str::<SavedLayouts>(&json).log_err() else {
+                continue;
+            };
+            let Some(workspace) = db.workspace_for_id(id) else {
+                continue;
+            };
+            if saved.paths != saved_paths(&workspace.paths) {
+                continue;
+            }
+            let remote = match workspace.location {
+                SerializedWorkspaceLocation::Local => None,
+                SerializedWorkspaceLocation::Remote(options) => Some(options),
+            };
+            catalog.push(SavedWorkspaceLayouts {
+                workspace_id: id,
+                paths: workspace.paths,
+                remote,
+                active: saved.active,
+                layouts: saved
+                    .layouts
+                    .into_iter()
+                    .map(|layout| SavedLayoutInfo {
+                        id: layout.id,
+                        name: layout.name.into(),
+                        group: layout.group.into(),
+                        scope: layout.scope,
+                    })
+                    .collect(),
+            });
+        }
+        catalog
+    })
+}
+
+/// Makes `layout` the one a saved workspace shows when it opens next.
+pub fn show_saved_layout_on_open(
+    workspace_id: WorkspaceId,
+    layout: LayoutId,
+    cx: &App,
+) -> Task<Result<()>> {
+    let kvp = db::kvp::KeyValueStore::global(cx);
+    cx.background_spawn(async move {
+        let key = layouts_key(workspace_id);
+        let Some(json) = kvp.scoped(LAYOUTS_NAMESPACE).read(&key)? else {
+            return Ok(());
+        };
+        let mut saved = serde_json::from_str::<SavedLayouts>(&json)?;
+        if saved.active == layout || !saved.layouts.iter().any(|saved| saved.id == layout) {
+            return Ok(());
+        }
+        saved.active = layout;
+        kvp.scoped(LAYOUTS_NAMESPACE)
+            .write(key, serde_json::to_string(&saved)?)
+            .await
+    })
 }
 
 fn layouts_key(workspace_id: WorkspaceId) -> String {
@@ -736,6 +884,8 @@ struct SavedLayout {
     name: String,
     #[serde(default)]
     group: String,
+    #[serde(default)]
+    scope: Option<LayoutScope>,
     center: SavedMember,
 }
 

@@ -77,7 +77,10 @@ pub use item::{
 };
 use itertools::Itertools;
 use language::{Buffer, LanguageRegistry, Rope, language_settings::all_language_settings};
-pub use layouts::{Layout, LayoutId, LayoutOutline};
+pub use layouts::{
+    Layout, LayoutId, LayoutOutline, LayoutScope, SavedLayoutInfo, SavedWorkspaceLayouts,
+    saved_layout_catalog, show_saved_layout_on_open,
+};
 pub use modal_layer::*;
 use node_runtime::NodeRuntime;
 use notifications::{

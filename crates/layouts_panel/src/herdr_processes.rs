@@ -3,8 +3,8 @@
 //! overview of one workspace.
 
 use super::{
-    HerdrTerminal, Place, display_folder, end_program, folder_name, is_agent, open_herdr_terminal,
-    open_in_new_layout, place_of, project_roots,
+    HerdrTerminal, Place, display_folder, end_program, folder_name, is_agent, is_within,
+    open_herdr_terminal, open_in_new_layout, place_of, project_roots,
 };
 use anyhow::{Context as _, Result};
 use db::{
@@ -28,8 +28,8 @@ use theme::ActiveTheme as _;
 use ui::{ContextMenu, IconButtonShape, Indicator, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
 use workspace::{
-    Item, ItemId, SerializableItem, Workspace, WorkspaceDb, WorkspaceId, delete_unloaded_items,
-    item::ItemEvent,
+    Item, ItemId, LayoutScope, SerializableItem, Workspace, WorkspaceDb, WorkspaceId,
+    delete_unloaded_items, item::ItemEvent,
 };
 
 use super::agent_color;
@@ -117,6 +117,18 @@ pub(crate) struct ProcessView {
     sort: Column,
     #[serde(default)]
     descending: bool,
+    /// Only the programs that work in this folder, or under it.
+    #[serde(default)]
+    pub(crate) scope: Option<LayoutScope>,
+}
+
+impl ProcessView {
+    pub(crate) fn scoped(scope: Option<LayoutScope>) -> Self {
+        Self {
+            scope,
+            ..Self::default()
+        }
+    }
 }
 
 struct ProcessRow {
@@ -126,6 +138,7 @@ struct ProcessRow {
     machine: SharedString,
     place: Place,
     folder: SharedString,
+    cwd: String,
     layout: Option<SharedString>,
     state: Option<AgentState>,
     is_agent: bool,
@@ -225,8 +238,11 @@ pub struct HerdrProcesses {
 }
 
 impl HerdrProcesses {
+    /// `workspace_id` comes from the caller: a workspace opens its tables
+    /// while it is being updated, and cannot be read then.
     pub(crate) fn new(
         workspace: WeakEntity<Workspace>,
+        workspace_id: Option<WorkspaceId>,
         view: ProcessView,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -238,9 +254,6 @@ impl HerdrProcesses {
             editor.set_text(view.query.clone(), window, cx);
             editor
         });
-        let workspace_id = workspace
-            .upgrade()
-            .and_then(|workspace| workspace.read(cx).database_id());
         let mut subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&query_editor, |this, editor, event: &EditorEvent, cx| {
@@ -320,6 +333,11 @@ impl HerdrProcesses {
             .into_iter()
             .map(|record| process_row(record, &roots, &layouts))
             .filter(|row| self.view.show_ended || row.is_live)
+            .filter(|row| {
+                self.view.scope.as_ref().is_none_or(|scope| {
+                    row.place.machine == scope.machine && is_within(&row.cwd, &scope.folder)
+                })
+            })
             .filter(|row| match self.view.kind {
                 Kind::All => true,
                 Kind::Agents => row.is_agent,
@@ -411,6 +429,21 @@ impl HerdrProcesses {
                             }))
                     })),
             )
+            .when_some(self.view.scope.clone(), |toolbar, scope| {
+                toolbar.child(
+                    Button::new("processes-scope", folder_name(&scope.folder))
+                        .label_size(LabelSize::Small)
+                        .end_icon(Icon::new(IconName::Close).size(IconSize::XSmall))
+                        .toggle_state(true)
+                        .tooltip(Tooltip::text(format!(
+                            "Only what works in {}. Click to show every place.",
+                            display_folder(&scope.folder)
+                        )))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.change_view(cx, |view| view.scope = None);
+                        })),
+                )
+            })
             .child(
                 Button::new("processes-show-ended", "Ended")
                     .label_size(LabelSize::Small)
@@ -650,6 +683,7 @@ fn process_row(
         machine: machine.to_string().into(),
         place,
         folder: folder.into(),
+        cwd: record.current_folder().to_string(),
         layout: layouts.get(&record.address).cloned(),
         state: record.agent_state(),
         is_agent: is_agent(record),
@@ -738,12 +772,15 @@ impl Item for HerdrProcesses {
     type Event = ItemEvent;
 
     fn tab_content_text(&self, _detail: usize, _: &App) -> SharedString {
-        let query = self.view.query.trim();
-        if query.is_empty() {
-            "Herdr Programs".into()
-        } else {
-            format!("Herdr Programs · {query}").into()
+        let mut title = "Herdr Programs".to_string();
+        if let Some(scope) = &self.view.scope {
+            title.push_str(&format!(" · {}", folder_name(&scope.folder)));
         }
+        let query = self.view.query.trim();
+        if !query.is_empty() {
+            title.push_str(&format!(" · {query}"));
+        }
+        title.into()
     }
 
     fn tab_icon(&self, _: &Window, _: &App) -> Option<Icon> {
@@ -764,15 +801,15 @@ impl Item for HerdrProcesses {
 
     fn clone_on_split(
         &self,
-        _: Option<WorkspaceId>,
+        workspace_id: Option<WorkspaceId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Option<Entity<Self>>> {
         let workspace = self.workspace.clone();
         let view = self.view.clone();
-        Task::ready(Some(
-            cx.new(|cx| HerdrProcesses::new(workspace, view, window, cx)),
-        ))
+        Task::ready(Some(cx.new(|cx| {
+            HerdrProcesses::new(workspace, workspace_id, view, window, cx)
+        })))
     }
 
     fn added_to_workspace(
@@ -818,7 +855,9 @@ impl SerializableItem for HerdrProcesses {
             .view(item_id, workspace_id)
             .and_then(|json| json.context("no table of Herdr programs was saved for this tab"))
             .and_then(|json| Ok(serde_json::from_str::<ProcessView>(&json)?));
-        Task::ready(view.map(|view| cx.new(|cx| HerdrProcesses::new(workspace, view, window, cx))))
+        Task::ready(view.map(|view| {
+            cx.new(|cx| HerdrProcesses::new(workspace, Some(workspace_id), view, window, cx))
+        }))
     }
 
     fn serialize(
@@ -893,6 +932,7 @@ mod tests {
                 worktree: Some("fix".into()),
             },
             folder: "~/acme/.worktrees/fix".into(),
+            cwd: "/home/ada/acme/.worktrees/fix".into(),
             layout: None,
             state,
             is_agent: true,

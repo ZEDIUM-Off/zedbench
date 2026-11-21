@@ -28,7 +28,8 @@ use ui::{
 };
 use util::ResultExt as _;
 use workspace::{
-    LayoutId, LayoutOutline, Workspace,
+    CloseIntent, LayoutId, LayoutOutline, LayoutScope, OpenMode, PathList, SavedWorkspaceLayouts,
+    Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::NotifyTaskExt as _,
 };
@@ -53,8 +54,12 @@ actions!(
         /// Starts a shell in Herdr Core, in the folder of the project, and
         /// opens its tab.
         NewHerdrTerminal,
-        /// Opens a table of every program that Herdr Core runs.
+        /// Opens a table of every program that Herdr Core runs, limited to
+        /// the scope of the layout on screen.
         OpenProcesses,
+        /// Adds a group of layouts for each workspace where Herdr Core runs
+        /// programs: an overview, and a layout per worktree.
+        LayoutsFromRunningProjects,
     ]
 );
 
@@ -93,6 +98,9 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &OpenProcesses, window, cx| {
             open_processes(workspace, window, cx);
+        });
+        workspace.register_action(|workspace, _: &LayoutsFromRunningProjects, window, cx| {
+            layouts_from_running_projects(workspace, window, cx);
         });
     })
     .detach();
@@ -162,6 +170,7 @@ struct LayoutSummary {
     id: LayoutId,
     name: SharedString,
     group: SharedString,
+    scope: Option<LayoutScope>,
     active: bool,
     tabs: usize,
     agents: usize,
@@ -189,6 +198,9 @@ impl LayoutSummary {
 
     fn detail(&self) -> String {
         let mut parts = Vec::new();
+        if let Some(scope) = &self.scope {
+            parts.push(folder_name(&scope.folder));
+        }
         if self.agents > 0 {
             parts.push(count_of(self.agents, "agent"));
         }
@@ -204,8 +216,9 @@ impl LayoutSummary {
         if others > 0 {
             parts.push(count_of(others, "tab"));
         }
-        if parts.is_empty() {
-            "Empty".to_string()
+        if parts.is_empty() || (parts.len() == 1 && self.scope.is_some()) {
+            parts.push("Empty".to_string());
+            parts.join(" · ")
         } else {
             parts.join(" · ")
         }
@@ -242,6 +255,8 @@ pub struct LayoutsPanel {
     wide_width: Pixels,
     editing: Option<Editing>,
     error: Option<SharedString>,
+    /// The layouts that other workspaces saved, to open them from here.
+    saved_elsewhere: Vec<SavedWorkspaceLayouts>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -272,7 +287,17 @@ impl LayoutsPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = HerdrStore::global(cx);
+        let catalog = workspace::saved_layout_catalog(cx);
+        cx.spawn(async move |this, cx| {
+            let catalog = catalog.await;
+            this.update(cx, |this, cx| {
+                this.saved_elsewhere = catalog;
+                cx.notify();
+            })
+        })
+        .detach_and_log_err(cx);
         Self {
+            saved_elsewhere: Vec::new(),
             _subscriptions: vec![
                 cx.observe(&store, |_, _, cx| cx.notify()),
                 cx.subscribe(&workspace, |_, _, _: &workspace::Event, cx| cx.notify()),
@@ -363,6 +388,7 @@ impl LayoutsPanel {
                     id: layout.id(),
                     name: layout.name().clone(),
                     group: layout.group().clone(),
+                    scope: layout.scope().cloned(),
                     active: layout.id() == active,
                     tabs: 0,
                     agents: 0,
@@ -687,15 +713,19 @@ impl LayoutsPanel {
                     .color(Color::Muted),
             )
             .child(div().flex_1())
+            .child(self.render_new_layout_menu(cx))
+            .when(self.store.read(cx).is_connected(), |header| {
+                header.child(self.render_new_terminal_menu(cx))
+            })
             .child(
-                IconButton::new("layouts-new", IconName::Plus)
-                    .aria_label("New Layout")
+                IconButton::new("herdr-processes", IconName::ListTree)
+                    .aria_label("Herdr Programs")
                     .icon_size(IconSize::Small)
                     .shape(IconButtonShape::Square)
-                    .tooltip(|_, cx| Tooltip::for_action("New Layout", &NewLayout, cx))
+                    .tooltip(|_, cx| Tooltip::for_action("Herdr Programs", &OpenProcesses, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.update_workspace(window, cx, |workspace, window, cx| {
-                            new_layout(workspace, window, cx);
+                            open_processes(workspace, window, cx);
                         });
                     })),
             )
@@ -717,6 +747,7 @@ impl LayoutsPanel {
         index: usize,
         layout: &LayoutSummary,
         groups: &[SharedString],
+        scopes: &[LayoutScope],
         narrow: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -846,6 +877,8 @@ impl LayoutsPanel {
         let panel = cx.entity().downgrade();
         let groups = groups.to_vec();
         let group = layout.group.clone();
+        let scope = layout.scope.clone();
+        let scopes = scopes.to_vec();
         let is_only_layout = index == 0 && groups.is_empty() && self.is_single_layout(cx);
         right_click_menu(("layout-menu", index))
             .trigger(move |_, _, _| row)
@@ -853,6 +886,8 @@ impl LayoutsPanel {
                 let panel = panel.clone();
                 let groups = groups.clone();
                 let group = group.clone();
+                let scope = scope.clone();
+                let scopes = scopes.clone();
                 ContextMenu::build(window, cx, move |mut menu, _, _| {
                     menu = menu.entry("Rename", None, {
                         let panel = panel.clone();
@@ -924,6 +959,45 @@ impl LayoutsPanel {
                                 .log_err();
                         }
                     });
+                    menu = menu.separator().header("Scope");
+                    let choices = std::iter::once(None)
+                        .chain(scopes.iter().cloned().map(Some))
+                        .chain(
+                            scope
+                                .clone()
+                                .filter(|scope| !scopes.contains(scope))
+                                .map(Some),
+                        );
+                    for choice in choices {
+                        let label: SharedString = match &choice {
+                            Some(choice) => scope_label(choice).into(),
+                            None => "Global".into(),
+                        };
+                        menu = menu.toggleable_entry(
+                            label,
+                            choice == scope,
+                            IconPosition::Start,
+                            None,
+                            {
+                                let panel = panel.clone();
+                                move |window, cx| {
+                                    let choice = choice.clone();
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.update_workspace(
+                                                window,
+                                                cx,
+                                                move |workspace, window, cx| {
+                                                    workspace
+                                                        .set_layout_scope(id, choice, window, cx);
+                                                },
+                                            );
+                                        })
+                                        .log_err();
+                                }
+                            },
+                        );
+                    }
                     if !is_only_layout {
                         menu = menu.separator().entry("Close Layout", None, {
                             let panel = panel.clone();
@@ -938,6 +1012,212 @@ impl LayoutsPanel {
                 })
             })
             .into_any_element()
+    }
+
+    /// The layouts that other workspaces saved, under the name of their
+    /// folder. Opening one opens its workspace in the window.
+    fn render_saved_elsewhere(
+        &self,
+        current: Option<workspace::WorkspaceId>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let places = self
+            .saved_elsewhere
+            .iter()
+            .filter(|place| Some(place.workspace_id) != current)
+            .collect::<Vec<_>>();
+        if places.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let mut list = v_flex().w_full().px_1().gap_px().child(
+            div().px_1p5().child(
+                Label::new("Other Workspaces")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            ),
+        );
+        for place in places {
+            let key = format!("saved:{}", i64::from(place.workspace_id));
+            let is_folded = self.folded_nodes.contains(&key);
+            let folder = place
+                .paths
+                .paths()
+                .first()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let host = place.remote.as_ref().map(|remote| remote.display_name());
+            list = list.child(
+                h_flex()
+                    .id(SharedString::from(key.clone()))
+                    .role(Role::Button)
+                    .aria_label(format!("Workspace {}", folder_name(&folder)))
+                    .aria_expanded(!is_folded)
+                    .w_full()
+                    .gap_1()
+                    .px_1p5()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.ghost_element_hover))
+                    .child(
+                        Icon::new(if is_folded {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(folder_name(&folder))
+                            .size(LabelSize::Small)
+                            .truncate(),
+                    )
+                    .when_some(host, |row, host| {
+                        row.child(
+                            Label::new(host)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                    })
+                    .tooltip(Tooltip::text(display_folder(&folder)))
+                    .on_click(cx.listener({
+                        let key = key.clone();
+                        move |this, _, _, cx| this.toggle_node(&key, cx)
+                    })),
+            );
+            if is_folded {
+                continue;
+            }
+            for layout in &place.layouts {
+                let workspace_id = place.workspace_id;
+                let paths = place.paths.clone();
+                let remote = place.remote.clone();
+                let id = layout.id;
+                let mut detail = Vec::new();
+                if !layout.group.is_empty() {
+                    detail.push(layout.group.to_string());
+                }
+                if let Some(scope) = &layout.scope {
+                    detail.push(folder_name(&scope.folder));
+                }
+                list = list.child(
+                    h_flex()
+                        .id(SharedString::from(format!("{key}:{id:?}")))
+                        .role(Role::Tab)
+                        .aria_label(format!("{} · {}", layout.name, folder_name(&folder)))
+                        .w_full()
+                        .gap_2()
+                        .pl(indent(2))
+                        .pr_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.ghost_element_hover))
+                        .child(
+                            Icon::new(IconName::Screen)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(layout.name.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .when(!detail.is_empty(), |row| {
+                            row.child(
+                                Label::new(detail.join(" · "))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Placeholder)
+                                    .truncate(),
+                            )
+                        })
+                        .tooltip(Tooltip::text(format!(
+                            "Open {} on this layout",
+                            display_folder(&folder)
+                        )))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_saved_layout(
+                                workspace_id,
+                                paths.clone(),
+                                remote.clone(),
+                                id,
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+            }
+        }
+        Some(list.into_any_element())
+    }
+
+    /// Opens a saved workspace in the window, on one of its layouts. The
+    /// workspace on screen closes first, asking about unsaved files; its
+    /// Herdr programs keep running.
+    fn open_saved_layout(
+        &mut self,
+        workspace_id: workspace::WorkspaceId,
+        paths: PathList,
+        remote: Option<RemoteConnectionOptions>,
+        layout: LayoutId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_workspace(window, cx, move |workspace, window, cx| {
+            let Some(multi_workspace) = workspace
+                .multi_workspace()
+                .and_then(|multi_workspace| multi_workspace.upgrade())
+            else {
+                return;
+            };
+            let show_layout = workspace::show_saved_layout_on_open(workspace_id, layout, cx);
+            let close = workspace.prepare_to_close(CloseIntent::ReplaceWindow, window, cx);
+            let modal_workspace = cx.entity();
+            let weak_workspace = cx.entity().downgrade();
+            window
+                .spawn(cx, async move |cx| {
+                    show_layout.await.log_err();
+                    if !close.await? {
+                        return anyhow::Ok(());
+                    }
+                    let open = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+                        multi_workspace.find_or_create_workspace(
+                            paths,
+                            remote,
+                            None,
+                            move |options, window, cx| {
+                                remote_connection::connect_with_modal(
+                                    &modal_workspace,
+                                    options,
+                                    window,
+                                    cx,
+                                )
+                            },
+                            None,
+                            OpenMode::Activate,
+                            None,
+                            window,
+                            cx,
+                        )
+                    })?;
+                    let opened = open.await?;
+                    // A workspace that was open already keeps the layout it
+                    // showed: show the one asked for.
+                    opened.update_in(cx, |opened, window, cx| {
+                        opened.activate_layout(layout, window, cx);
+                    })?;
+                    anyhow::Ok(())
+                })
+                .detach_and_notify_err(weak_workspace, window, cx);
+        });
     }
 
     fn is_single_layout(&self, cx: &App) -> bool {
@@ -969,6 +1249,7 @@ impl LayoutsPanel {
     fn render_layouts(
         &self,
         layouts: &[LayoutSummary],
+        scopes: &[LayoutScope],
         narrow: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -982,7 +1263,7 @@ impl LayoutsPanel {
         let mut list = v_flex().w_full().px_1().gap_px();
         for (index, layout) in layouts.iter().enumerate() {
             if layout.group.is_empty() {
-                list = list.child(self.render_layout(index, layout, &groups, narrow, cx));
+                list = list.child(self.render_layout(index, layout, &groups, scopes, narrow, cx));
                 list = list.children(self.render_terminals_of(layout, narrow, cx));
             }
         }
@@ -1054,7 +1335,8 @@ impl LayoutsPanel {
             list = list.child(header);
             if !is_folded {
                 for (index, layout) in members {
-                    list = list.child(self.render_layout(index, layout, &groups, narrow, cx));
+                    list =
+                        list.child(self.render_layout(index, layout, &groups, scopes, narrow, cx));
                     list = list.children(self.render_terminals_of(layout, narrow, cx));
                 }
             }
@@ -1409,46 +1691,60 @@ impl LayoutsPanel {
         .into_any_element()
     }
 
-    /// What reaches all of Herdr Core from the panel: the table of its
-    /// programs, and a new terminal.
-    fn render_herdr_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let is_connected = self.store.read(cx).is_connected();
-        h_flex()
-            .w_full()
-            .px_2p5()
-            .gap_1()
-            .child(
-                Label::new("Herdr Core")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(div().flex_1())
-            .child(
-                IconButton::new("herdr-processes", IconName::ListTree)
-                    .aria_label("All Programs of Herdr Core")
+    fn render_new_layout_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let panel = cx.entity().downgrade();
+        PopoverMenu::new("layouts-new-menu")
+            .trigger_with_tooltip(
+                IconButton::new("layouts-new", IconName::Plus)
+                    .aria_label("New Layout")
                     .icon_size(IconSize::Small)
-                    .shape(IconButtonShape::Square)
-                    .tooltip(|_, cx| {
-                        Tooltip::for_action("All Programs of Herdr Core", &OpenProcesses, cx)
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.update_workspace(window, cx, |workspace, window, cx| {
-                            open_processes(workspace, window, cx);
-                        });
-                    })),
+                    .shape(IconButtonShape::Square),
+                Tooltip::text("New Layout"),
             )
-            .when(is_connected, |bar| {
-                bar.child(self.render_new_terminal_menu(cx))
+            .anchor(Anchor::TopRight)
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.entry("Empty Layout", Some(Box::new(NewLayout)), {
+                        let panel = panel.clone();
+                        move |window, cx| {
+                            panel
+                                .update(cx, |this, cx| {
+                                    this.update_workspace(window, cx, |workspace, window, cx| {
+                                        new_layout(workspace, window, cx);
+                                    });
+                                })
+                                .log_err();
+                        }
+                    })
+                    .entry(
+                        "Layouts for Running Projects",
+                        Some(Box::new(LayoutsFromRunningProjects)),
+                        move |window, cx| {
+                            panel
+                                .update(cx, |this, cx| {
+                                    this.update_workspace(window, cx, |workspace, window, cx| {
+                                        layouts_from_running_projects(workspace, window, cx);
+                                    });
+                                })
+                                .log_err();
+                        },
+                    )
+                }))
             })
             .into_any_element()
     }
 
     fn render_new_terminal_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let targets = run_targets(&self.project, &self.store, cx);
+        let scope = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).active_layout_scope().cloned());
+        let targets = run_targets(scope.as_ref(), &self.project, &self.store, cx);
         let panel = cx.entity().downgrade();
         PopoverMenu::new("herdr-new-terminal")
             .trigger_with_tooltip(
-                IconButton::new("herdr-new-terminal-trigger", IconName::Plus)
+                IconButton::new("herdr-new-terminal-trigger", IconName::Terminal)
                     .aria_label("New Terminal in Herdr Core")
                     .icon_size(IconSize::Small)
                     .shape(IconButtonShape::Square),
@@ -1781,9 +2077,20 @@ fn place_label(machine: Option<&str>, folder: Option<&String>) -> SharedString {
 
 /// Every place the panel offers to start a terminal: the place of the
 /// project first, then the home folder of each machine.
-fn run_targets(project: &Entity<Project>, store: &Entity<HerdrStore>, cx: &App) -> Vec<RunTarget> {
+fn run_targets(
+    scope: Option<&LayoutScope>,
+    project: &Entity<Project>,
+    store: &Entity<HerdrStore>,
+    cx: &App,
+) -> Vec<RunTarget> {
     let default = default_target(project, store, cx);
-    let mut targets = vec![default.clone()];
+    let mut targets = Vec::new();
+    if let Some(scope) = scope
+        && (scope.machine != default.machine || Some(&scope.folder) != default.folder.as_ref())
+    {
+        targets.push(scope_target(scope));
+    }
+    targets.push(default.clone());
     let machines = std::iter::once(None).chain(
         store
             .read(cx)
@@ -1835,7 +2142,10 @@ fn run_in_herdr(
 
 fn new_herdr_terminal(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let store = HerdrStore::global(cx);
-    let target = default_target(workspace.project(), &store, cx);
+    let target = match workspace.active_layout_scope() {
+        Some(scope) => scope_target(scope),
+        None => default_target(workspace.project(), &store, cx),
+    };
     let weak_workspace = cx.entity().downgrade();
     run_in_herdr(weak_workspace.clone(), &target, None, window, cx).detach_and_notify_err(
         weak_workspace,
@@ -1889,11 +2199,172 @@ fn end_program(
     })
 }
 
-/// Opens a table of every program of Herdr Core in the pane on screen.
+/// Opens a table of the programs of Herdr Core in the pane on screen,
+/// limited to the scope of the layout on screen.
 fn open_processes(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let scope = workspace.active_layout_scope().cloned();
+    add_process_table(workspace, scope, window, cx);
+}
+
+fn add_process_table(
+    workspace: &mut Workspace,
+    scope: Option<LayoutScope>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let weak_workspace = cx.entity().downgrade();
-    let item = cx.new(|cx| HerdrProcesses::new(weak_workspace, ProcessView::default(), window, cx));
+    let workspace_id = workspace.database_id();
+    let view = ProcessView::scoped(scope);
+    let item = cx.new(|cx| HerdrProcesses::new(weak_workspace, workspace_id, view, window, cx));
     workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+}
+
+/// Adds a view of a terminal to the pane on screen, even when another
+/// layout shows it already.
+fn add_herdr_view(
+    workspace: &mut Workspace,
+    address: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let weak_workspace = cx.entity().downgrade();
+    let workspace_id = workspace.database_id();
+    let project = workspace.project().downgrade();
+    let address = SharedString::from(address.to_string());
+    let item =
+        cx.new(|cx| HerdrTerminal::new(address, weak_workspace, workspace_id, project, window, cx));
+    workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
+}
+
+/// For each workspace where Herdr Core runs programs, a group named after
+/// it with an overview of its programs, a layout for the terminals of its
+/// main worktree and one per other worktree. A layout that exists already,
+/// by name and scope, is not made again. The layout on screen stays.
+fn layouts_from_running_projects(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let store = HerdrStore::global(cx);
+    let roots = project_roots(workspace.project(), &store, cx);
+    let mut projects: BTreeMap<(Option<String>, String), BTreeMap<Option<String>, Vec<String>>> =
+        BTreeMap::new();
+    for record in store.read(cx).terminals() {
+        if !record.is_live() {
+            continue;
+        }
+        let place = place_of(record.machine(), record.current_folder(), &roots);
+        projects
+            .entry((place.machine, place.workspace))
+            .or_default()
+            .entry(place.worktree)
+            .or_default()
+            .push(record.address.clone());
+    }
+    let existing = workspace
+        .layouts()
+        .iter()
+        .map(|layout| (layout.name().to_string(), layout.scope().cloned()))
+        .collect::<HashSet<_>>();
+    let shown = workspace.active_layout();
+    for ((machine, folder), worktrees) in projects {
+        let group = folder_name(&folder);
+        let mut wanted = vec![("Overview".to_string(), folder.clone(), None)];
+        for (worktree, addresses) in worktrees {
+            match worktree {
+                None => wanted.push(("main".to_string(), folder.clone(), Some(addresses))),
+                Some(worktree) => {
+                    let folder = worktree_folder(&folder, &worktree);
+                    wanted.push((worktree, folder, Some(addresses)));
+                }
+            }
+        }
+        for (name, scope_folder, addresses) in wanted {
+            let scope = LayoutScope {
+                machine: machine.clone(),
+                folder: scope_folder,
+            };
+            if existing.contains(&(name.clone(), Some(scope.clone()))) {
+                continue;
+            }
+            let layout = workspace.create_layout(name, group.clone(), window, cx);
+            workspace.set_layout_scope(layout, Some(scope.clone()), window, cx);
+            match addresses {
+                None => add_process_table(workspace, Some(scope), window, cx),
+                Some(addresses) => {
+                    for address in addresses {
+                        add_herdr_view(workspace, &address, window, cx);
+                    }
+                }
+            }
+        }
+    }
+    workspace.activate_layout(shown, window, cx);
+}
+
+/// The folder of a worktree kept under `.worktrees/` of its workspace.
+fn worktree_folder(workspace: &str, worktree: &str) -> String {
+    let separator = if workspace.contains('\\') && !workspace.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    format!("{workspace}{separator}.worktrees{separator}{worktree}")
+}
+
+fn scope_label(scope: &LayoutScope) -> String {
+    match &scope.machine {
+        Some(machine) => format!("{} · {machine}", display_folder(&scope.folder)),
+        None => display_folder(&scope.folder),
+    }
+}
+
+fn scope_target(scope: &LayoutScope) -> RunTarget {
+    RunTarget {
+        label: place_label(scope.machine.as_deref(), Some(&scope.folder)),
+        machine: scope.machine.clone(),
+        folder: Some(scope.folder.clone()),
+    }
+}
+
+/// The places a layout can take as its scope: the folders of the project,
+/// then every workspace and worktree where Herdr Core runs programs.
+fn scope_choices(
+    roots: &[(Option<String>, String)],
+    store: &Entity<HerdrStore>,
+    cx: &App,
+) -> Vec<LayoutScope> {
+    let mut choices = roots
+        .iter()
+        .map(|(machine, folder)| LayoutScope {
+            machine: machine.clone(),
+            folder: folder.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut running = BTreeMap::new();
+    for record in store.read(cx).terminals() {
+        if !record.is_live() {
+            continue;
+        }
+        let place = place_of(record.machine(), record.current_folder(), roots);
+        let folder = match &place.worktree {
+            Some(worktree) => worktree_folder(&place.workspace, worktree),
+            None => place.workspace.clone(),
+        };
+        running.insert(
+            (place.machine.clone(), folder.clone()),
+            LayoutScope {
+                machine: place.machine,
+                folder,
+            },
+        );
+    }
+    for scope in running.into_values() {
+        if !choices.contains(&scope) {
+            choices.push(scope);
+        }
+    }
+    choices
 }
 
 fn is_within(folder: &str, root: &str) -> bool {
@@ -2022,11 +2493,13 @@ impl Render for LayoutsPanel {
             return div().into_any_element();
         };
         let roots = project_roots(&self.project, &self.store, cx);
-        let (narrow, layouts) = {
+        let scopes = scope_choices(&roots, &self.store, cx);
+        let (narrow, layouts, current_id) = {
             let workspace = workspace.read(cx);
             (
                 self.width(workspace, cx) < NARROW_LIMIT,
                 self.layout_summaries(workspace, &roots, cx),
+                workspace.database_id(),
             )
         };
 
@@ -2048,12 +2521,14 @@ impl Render for LayoutsPanel {
                     .pb_2()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .child(self.render_layouts(&layouts, narrow, cx))
-                    .child(div().mx_2().h_px().bg(cx.theme().colors().border_variant))
-                    .child(if narrow {
-                        self.render_narrow_inventory(cx)
-                    } else {
-                        self.render_herdr_bar(cx)
+                    .child(self.render_layouts(&layouts, &scopes, narrow, cx))
+                    .when(!narrow, |content| {
+                        content.children(self.render_saved_elsewhere(current_id, cx))
+                    })
+                    .when(narrow, |content| {
+                        content
+                            .child(div().mx_2().h_px().bg(cx.theme().colors().border_variant))
+                            .child(self.render_narrow_inventory(cx))
                     }),
             )
             .when(!narrow, |panel| {
@@ -2381,6 +2856,32 @@ impl Render for LayoutPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    async fn test_a_workspace_opens_a_table_while_it_is_updated(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            super::init(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/project"), serde_json::json!({}))
+            .await;
+        let project = Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_processes(workspace, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.active_item_as::<HerdrProcesses>(cx).is_some());
+        });
+    }
 
     #[test]
     fn a_terminal_runs_in_a_project_by_its_folder() {

@@ -107,6 +107,13 @@ impl ScopedKeyValueStore<'_> {
         .context("Failed to read from scoped_kv_store")
     }
 
+    pub fn read_all(&self) -> anyhow::Result<Vec<(String, String)>> {
+        self.store.select_bound::<&str, (String, String)>(
+            "SELECT key, value FROM scoped_kv_store WHERE namespace = (?)",
+        )?(self.namespace)
+        .context("Failed to read from scoped_kv_store")
+    }
+
     pub async fn write(&self, key: String, value: String) -> anyhow::Result<()> {
         let namespace = self.namespace.to_owned();
         self.store

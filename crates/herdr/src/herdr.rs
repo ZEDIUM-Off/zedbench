@@ -197,6 +197,37 @@ impl TerminalRecord {
         self.argv.first().map_or("", String::as_str)
     }
 
+    /// The name of the session of an agent, from the title it gives its
+    /// terminal: `π - fix the menu - tea` says `fix the menu`. The program
+    /// and the folder around it are dropped; a title with nothing else, or
+    /// the title of a plain shell, gives none.
+    pub fn session_title(&self) -> Option<String> {
+        self.status.as_ref()?;
+        let mut parts = self
+            .title
+            .split(" - ")
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        let program = self.program();
+        if parts
+            .first()
+            .is_some_and(|first| first.chars().count() <= 2 || first.eq_ignore_ascii_case(program))
+        {
+            parts.remove(0);
+        }
+        let folder = self.current_folder().trim_end_matches(['/', '\\']);
+        let folder = folder.rsplit(['/', '\\']).next().unwrap_or(folder);
+        if parts.len() > 1 && parts.last() == Some(&folder) {
+            parts.pop();
+        }
+        if parts.len() == 1 && parts[0] == folder {
+            return None;
+        }
+        let title = parts.join(" - ");
+        (!title.is_empty()).then_some(title)
+    }
+
     /// What to call the terminal: the name it was given, else what its
     /// program or its owner says, else its folder.
     pub fn display_name(&self) -> String {
@@ -210,6 +241,9 @@ impl TerminalRecord {
             .filter(|title| !title.is_empty())
         {
             return title.to_string();
+        }
+        if let Some(title) = self.session_title() {
+            return title;
         }
         if let Some(place) = self.labels.get("where").filter(|place| !place.is_empty()) {
             return place.clone();
@@ -771,6 +805,28 @@ mod tests {
 
     fn event(kind: &str, terminal: &str, data: Value) -> Value {
         json!({"seq": 1, "type": kind, "terminal": terminal, "data": data})
+    }
+
+    #[test]
+    fn an_agent_names_its_session_in_its_title() {
+        let record = |title: &str, status: bool| {
+            let mut value = json!({"address": "t1", "argv": ["pi"], "cwd": "/srv/tea",
+                                   "state": "live", "title": title});
+            if status {
+                value["status"] = json!({"state": "idle", "app": "pi"});
+            }
+            serde_json::from_value::<TerminalRecord>(value).expect("a record")
+        };
+        assert_eq!(
+            record("π - fix the menu - tea", true).session_title(),
+            Some("fix the menu".to_string())
+        );
+        assert_eq!(
+            record("π - fix the menu - tea", true).display_name(),
+            "fix the menu"
+        );
+        assert_eq!(record("π - tea", true).session_title(), None);
+        assert_eq!(record("person@host:~/tea", false).session_title(), None);
     }
 
     #[test]

@@ -29,7 +29,7 @@ use ui::{
 use util::ResultExt as _;
 use workspace::{
     CloseIntent, LayoutId, LayoutOutline, LayoutScope, OpenMode, PathList, SavedWorkspaceLayouts,
-    Workspace,
+    SerializedWorkspaceLocation, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::NotifyTaskExt as _,
 };
@@ -255,6 +255,11 @@ pub struct LayoutsPanel {
     /// The Herdr programs the window has had a tab for, by address and
     /// start. `None` until read from the database.
     placed: Option<HashSet<(String, u64)>>,
+    /// The projects that Zed opened lately, which get a group each.
+    recent_projects: Vec<(Option<RemoteConnectionOptions>, PathList)>,
+    /// The workspaces the window has made a group for. `None` until read
+    /// from the database.
+    organized: Option<HashSet<LayoutScope>>,
     placing: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -275,17 +280,31 @@ impl LayoutsPanel {
             .flatten()
             .and_then(|json| serde_json::from_str::<SerializedLayoutsPanel>(&json).log_err())
             .unwrap_or_default();
-        let placed_key =
-            workspace.read_with(&cx, |workspace, _| workspace.database_id().map(placed_key))?;
-        let placed = match placed_key {
-            Some(key) => cx
-                .background_spawn(async move { kvp.read_kvp(&key) })
+        let workspace_id = workspace.read_with(&cx, |workspace, _| workspace.database_id())?;
+        let (placed, organized) = match workspace_id {
+            Some(workspace_id) => {
+                let placed_key = placed_key(workspace_id);
+                let organized_key = organized_key(workspace_id);
+                cx.background_spawn(async move {
+                    let placed = kvp
+                        .read_kvp(&placed_key)
+                        .log_err()
+                        .flatten()
+                        .and_then(|json| {
+                            serde_json::from_str::<Vec<(String, u64)>>(&json).log_err()
+                        })
+                        .unwrap_or_default();
+                    let organized = kvp
+                        .read_kvp(&organized_key)
+                        .log_err()
+                        .flatten()
+                        .and_then(|json| serde_json::from_str::<Vec<LayoutScope>>(&json).log_err())
+                        .unwrap_or_default();
+                    (placed, organized)
+                })
                 .await
-                .log_err()
-                .flatten()
-                .and_then(|json| serde_json::from_str::<Vec<(String, u64)>>(&json).log_err())
-                .unwrap_or_default(),
-            None => Vec::new(),
+            }
+            None => (Vec::new(), Vec::new()),
         };
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let workspace_entity = cx.entity();
@@ -293,6 +312,7 @@ impl LayoutsPanel {
             let panel = cx.new(|cx| Self::new(workspace_entity, project, serialized, window, cx));
             panel.update(cx, |panel, cx| {
                 panel.placed = Some(placed.into_iter().collect());
+                panel.organized = Some(organized.into_iter().collect());
                 panel.schedule_placing(window, cx);
             });
             panel
@@ -316,9 +336,30 @@ impl LayoutsPanel {
             })
         })
         .detach_and_log_err(cx);
+        let db = workspace::WorkspaceDb::global(cx);
+        let fs = project.read(cx).fs().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let recent = db.recent_project_workspaces(fs.as_ref()).await?;
+            this.update_in(cx, |this, window, cx| {
+                this.recent_projects = recent
+                    .into_iter()
+                    .map(|recent| {
+                        let remote = match recent.location {
+                            SerializedWorkspaceLocation::Local => None,
+                            SerializedWorkspaceLocation::Remote(options) => Some(options),
+                        };
+                        (remote, recent.paths)
+                    })
+                    .collect();
+                this.schedule_placing(window, cx);
+            })
+        })
+        .detach_and_log_err(cx);
         Self {
             saved_elsewhere: Vec::new(),
             placed: None,
+            recent_projects: Vec::new(),
+            organized: None,
             placing: None,
             _subscriptions: vec![
                 cx.observe_in(&store, window, |this, _, window, cx| {
@@ -402,11 +443,56 @@ impl LayoutsPanel {
         if changed {
             self.save_placed(cx);
         }
-        if !new.is_empty() {
+        let projects = self.new_projects(cx);
+        if !new.is_empty() || !projects.is_empty() {
             self.update_workspace(window, cx, move |workspace, window, cx| {
+                for scope in projects {
+                    ensure_overview(workspace, scope, window, cx);
+                }
                 place_programs(workspace, new, window, cx);
             });
         }
+    }
+
+    /// The workspaces of the projects Zed knows that never had a group in
+    /// this window. Each is counted once: a group the person closes stays
+    /// closed.
+    fn new_projects(&mut self, cx: &mut Context<Self>) -> Vec<LayoutScope> {
+        let roots = self.project_folders(cx);
+        let Some(organized) = self.organized.as_mut() else {
+            return Vec::new();
+        };
+        let mut new = Vec::new();
+        for (machine, folder) in roots {
+            if is_home_folder(&folder) {
+                continue;
+            }
+            let place = place_of(machine.as_deref(), &folder, &[]);
+            let scope = LayoutScope {
+                machine: place.machine,
+                folder: place.workspace,
+            };
+            if organized.insert(scope.clone()) {
+                new.push(scope);
+            }
+        }
+        if !new.is_empty() {
+            let organized = organized.iter().cloned().collect::<Vec<_>>();
+            if let Some(key) = self
+                .workspace
+                .upgrade()
+                .and_then(|workspace| workspace.read(cx).database_id())
+                .map(organized_key)
+            {
+                let kvp = KeyValueStore::global(cx);
+                cx.background_spawn(async move {
+                    let json = serde_json::to_string(&organized)?;
+                    kvp.write_kvp(key, json).await
+                })
+                .detach_and_log_err(cx);
+            }
+        }
+        new
     }
 
     fn save_placed(&self, cx: &mut Context<Self>) {
@@ -434,24 +520,45 @@ impl LayoutsPanel {
     /// other workspaces of Zed. A home folder holds none, or every program
     /// would land in it.
     fn place_roots(&self, cx: &App) -> Vec<(Option<String>, String)> {
-        let store = self.store.read(cx);
         let mut roots = project_roots(&self.project, &self.store, cx);
-        for saved in &self.saved_elsewhere {
-            let machine = match &saved.remote {
+        for root in self.project_folders(cx) {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        roots
+    }
+
+    /// The folders of the projects Zed opened lately or saved layouts for,
+    /// on the Herdr machine that reaches them.
+    fn project_folders(&self, cx: &App) -> Vec<(Option<String>, String)> {
+        let store = self.store.read(cx);
+        let projects = self
+            .recent_projects
+            .iter()
+            .map(|(remote, paths)| (remote.as_ref(), paths))
+            .chain(
+                self.saved_elsewhere
+                    .iter()
+                    .map(|saved| (saved.remote.as_ref(), &saved.paths)),
+            );
+        let mut folders = Vec::new();
+        for (remote, paths) in projects {
+            let machine = match remote {
                 Some(remote) => match remote_machine(remote, store) {
                     Some(machine) => machine,
                     None => continue,
                 },
                 None => None,
             };
-            for path in saved.paths.paths() {
-                let root = (machine.clone(), path.to_string_lossy().into_owned());
-                if !roots.contains(&root) {
-                    roots.push(root);
+            for path in paths.paths() {
+                let folder = (machine.clone(), path.to_string_lossy().into_owned());
+                if !folders.contains(&folder) {
+                    folders.push(folder);
                 }
             }
         }
-        roots
+        folders
     }
 
     fn serialize(&self, cx: &mut Context<Self>) {
@@ -1034,107 +1141,109 @@ impl LayoutsPanel {
                                 .log_err();
                         }
                     });
-                    menu = menu.separator().header("Group");
-                    for name in &groups {
-                        menu = menu.toggleable_entry(
-                            name.clone(),
-                            *name == group,
-                            IconPosition::Start,
-                            None,
-                            {
-                                let panel = panel.clone();
-                                let name = name.clone();
-                                move |window, cx| {
-                                    let name = name.clone();
-                                    panel
-                                        .update(cx, |this, cx| {
-                                            this.update_workspace(
+                    menu = menu.separator().submenu("Group", {
+                        let panel = panel.clone();
+                        let groups = groups.clone();
+                        let group = group.clone();
+                        move |mut menu, _, _| {
+                            for name in &groups {
+                                menu = menu.toggleable_entry(
+                                    name.clone(),
+                                    *name == group,
+                                    IconPosition::Start,
+                                    None,
+                                    {
+                                        let panel = panel.clone();
+                                        let name = name.clone();
+                                        move |window, cx| {
+                                            set_group_from_menu(
+                                                &panel,
+                                                id,
+                                                name.clone(),
                                                 window,
                                                 cx,
-                                                move |workspace, window, cx| {
-                                                    workspace
-                                                        .set_layout_group(id, name, window, cx);
-                                                },
+                                            );
+                                        }
+                                    },
+                                );
+                            }
+                            if !group.is_empty() {
+                                menu = menu.entry("No Group", None, {
+                                    let panel = panel.clone();
+                                    move |window, cx| {
+                                        set_group_from_menu(&panel, id, "".into(), window, cx);
+                                    }
+                                });
+                            }
+                            menu.separator().entry("New Group…", None, {
+                                let panel = panel.clone();
+                                move |window, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.start_edit(
+                                                EditTarget::Group(id),
+                                                "",
+                                                "Name of the group",
+                                                window,
+                                                cx,
                                             );
                                         })
                                         .log_err();
                                 }
-                            },
-                        );
-                    }
-                    if !group.is_empty() {
-                        menu = menu.entry("No Group", None, {
-                            let panel = panel.clone();
-                            move |window, cx| {
-                                panel
-                                    .update(cx, |this, cx| {
-                                        this.update_workspace(
-                                            window,
-                                            cx,
-                                            move |workspace, window, cx| {
-                                                workspace.set_layout_group(id, "", window, cx);
-                                            },
-                                        );
-                                    })
-                                    .log_err();
-                            }
-                        });
-                    }
-                    menu = menu.entry("New Group…", None, {
-                        let panel = panel.clone();
-                        move |window, cx| {
-                            panel
-                                .update(cx, |this, cx| {
-                                    this.start_edit(
-                                        EditTarget::Group(id),
-                                        "",
-                                        "Name of the group",
-                                        window,
-                                        cx,
-                                    );
-                                })
-                                .log_err();
+                            })
                         }
                     });
-                    menu = menu.separator().header("Scope");
-                    let choices = std::iter::once(None)
-                        .chain(scopes.iter().cloned().map(Some))
-                        .chain(
-                            scope
-                                .clone()
-                                .filter(|scope| !scopes.contains(scope))
-                                .map(Some),
-                        );
-                    for choice in choices {
-                        let label: SharedString = match &choice {
-                            Some(choice) => scope_label(choice).into(),
-                            None => "Global".into(),
-                        };
-                        menu = menu.toggleable_entry(
-                            label,
-                            choice == scope,
-                            IconPosition::Start,
-                            None,
-                            {
-                                let panel = panel.clone();
-                                move |window, cx| {
-                                    let choice = choice.clone();
-                                    panel
-                                        .update(cx, |this, cx| {
-                                            this.update_workspace(
-                                                window,
-                                                cx,
-                                                move |workspace, window, cx| {
-                                                    workspace
-                                                        .set_layout_scope(id, choice, window, cx);
-                                                },
-                                            );
-                                        })
-                                        .log_err();
-                                }
-                            },
-                        );
-                    }
+                    let scope_title: SharedString = match &scope {
+                        Some(scope) => format!("Scope: {}", folder_name(&scope.folder)).into(),
+                        None => "Scope: Global".into(),
+                    };
+                    menu = menu.submenu(scope_title, {
+                        let panel = panel.clone();
+                        let scope = scope.clone();
+                        let scopes = scopes.clone();
+                        move |mut menu, _, _| {
+                            let choices = std::iter::once(None)
+                                .chain(scopes.iter().cloned().map(Some))
+                                .chain(
+                                    scope
+                                        .clone()
+                                        .filter(|scope| !scopes.contains(scope))
+                                        .map(Some),
+                                );
+                            for choice in choices {
+                                let label: SharedString = match &choice {
+                                    Some(choice) => scope_label(choice).into(),
+                                    None => "Global".into(),
+                                };
+                                menu = menu.toggleable_entry(
+                                    label,
+                                    choice == scope,
+                                    IconPosition::Start,
+                                    None,
+                                    {
+                                        let panel = panel.clone();
+                                        move |window, cx| {
+                                            let choice = choice.clone();
+                                            panel
+                                                .update(cx, |this, cx| {
+                                                    this.update_workspace(
+                                                        window,
+                                                        cx,
+                                                        move |workspace, window, cx| {
+                                                            workspace.set_layout_scope(
+                                                                id, choice, window, cx,
+                                                            );
+                                                        },
+                                                    );
+                                                })
+                                                .log_err();
+                                        }
+                                    },
+                                );
+                            }
+                            menu
+                        }
+                    });
                     if !is_only_layout {
                         menu = menu.separator().entry("Close Layout", None, {
                             let panel = panel.clone();
@@ -2452,33 +2561,15 @@ fn place_programs(
 ) {
     for (address, place) in programs {
         let group = folder_name(&place.workspace);
-        let workspace_scope = LayoutScope {
-            machine: place.machine.clone(),
-            folder: place.workspace.clone(),
-        };
-        let has_overview = workspace
-            .layouts()
-            .iter()
-            .any(|layout| layout.scope() == Some(&workspace_scope) && **layout.name() == *OVERVIEW);
-        if !has_overview {
-            let overview = workspace.add_hidden_layout(
-                OVERVIEW,
-                group.clone(),
-                Some(workspace_scope.clone()),
-                window,
-                cx,
-            );
-            if let Some(pane) = workspace.layout_active_pane(overview) {
-                let weak_workspace = cx.entity().downgrade();
-                let workspace_id = workspace.database_id();
-                let view = ProcessView::scoped(Some(workspace_scope));
-                let item = cx
-                    .new(|cx| HerdrProcesses::new(weak_workspace, workspace_id, view, window, cx));
-                pane.update(cx, |pane, cx| {
-                    pane.add_item(Box::new(item), false, false, None, window, cx);
-                });
-            }
-        }
+        ensure_overview(
+            workspace,
+            LayoutScope {
+                machine: place.machine.clone(),
+                folder: place.workspace.clone(),
+            },
+            window,
+            cx,
+        );
         let scope = place_scope(&place);
         let existing = workspace
             .layouts()
@@ -2503,6 +2594,54 @@ fn place_programs(
             pane.add_item(Box::new(item), false, false, None, window, cx);
         });
     }
+}
+
+fn set_group_from_menu(
+    panel: &WeakEntity<LayoutsPanel>,
+    layout: LayoutId,
+    group: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    panel
+        .update(cx, |this, cx| {
+            this.update_workspace(window, cx, move |workspace, window, cx| {
+                workspace.set_layout_group(layout, group, window, cx);
+            });
+        })
+        .log_err();
+}
+
+/// Gives a workspace its group, with an overview of its programs, unless
+/// it has one.
+fn ensure_overview(
+    workspace: &mut Workspace,
+    scope: LayoutScope,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let has_overview = workspace
+        .layouts()
+        .iter()
+        .any(|layout| layout.scope() == Some(&scope) && **layout.name() == *OVERVIEW);
+    if has_overview {
+        return;
+    }
+    let group = folder_name(&scope.folder);
+    let overview = workspace.add_hidden_layout(OVERVIEW, group, Some(scope.clone()), window, cx);
+    if let Some(pane) = workspace.layout_active_pane(overview) {
+        let weak_workspace = cx.entity().downgrade();
+        let workspace_id = workspace.database_id();
+        let view = ProcessView::scoped(Some(scope));
+        let item = cx.new(|cx| HerdrProcesses::new(weak_workspace, workspace_id, view, window, cx));
+        pane.update(cx, |pane, cx| {
+            pane.add_item(Box::new(item), false, false, None, window, cx);
+        });
+    }
+}
+
+fn organized_key(workspace_id: workspace::WorkspaceId) -> String {
+    format!("{PANEL_KEY}-organized-{}", i64::from(workspace_id))
 }
 
 /// The folder of a worktree kept under `.worktrees/` of its workspace.

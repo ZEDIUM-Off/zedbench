@@ -1459,7 +1459,15 @@ fn cleanup_old_binaries_wsl() {
 fn is_new_version(version: &str) -> bool {
     semver::Version::from_str(version)
         .ok()
-        .zip(semver::Version::from_str(env!("ZED_PKG_VERSION")).ok())
+        // Zedbench names its servers after its own version, not after the
+        // version of Zed it is built on, which is higher: comparing with
+        // Zed's would remove every Zedbench server that is not running.
+        .zip(
+            semver::Version::from_str(
+                option_env!("ZEDIUM_PRIVATE_VERSION").unwrap_or(env!("ZED_PKG_VERSION")),
+            )
+            .ok(),
+        )
         .is_some_and(|(version, current_version)| version >= current_version)
 }
 

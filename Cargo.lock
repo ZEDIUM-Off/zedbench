@@ -14436,6 +14436,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "panel_tabs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "db",
+ "debugger_ui",
+ "editor",
+ "git_ui",
+ "gpui",
+ "outline_panel",
+ "project",
+ "project_panel",
+ "recent_projects",
+ "remote",
+ "remote_connection",
+ "serde",
+ "serde_json",
+ "settings",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "title_bar",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "pango"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -25342,6 +25371,7 @@ dependencies = [
  "onboarding",
  "outline",
  "outline_panel",
+ "panel_tabs",
  "parking_lot",
  "paths",
  "picker",

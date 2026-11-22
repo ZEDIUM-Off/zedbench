@@ -726,6 +726,7 @@ fn main() {
         project_panel::init(cx);
         outline_panel::init(cx);
         layouts_panel::init(cx);
+        panel_tabs::init(cx);
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         #[cfg(feature = "collab")]

@@ -82,7 +82,7 @@ use workspace::{
 };
 use worktree::CreatedEntry;
 use zed_actions::{
-    project_panel::{OpenAsTab, Toggle, ToggleFocus},
+    project_panel::{Toggle, ToggleFocus},
     workspace::OpenWithSystem,
 };
 
@@ -508,12 +508,7 @@ impl FoldedAncestors {
 }
 
 pub fn init(cx: &mut App) {
-    workspace::register_serializable_item::<ProjectPanelTab>(cx);
     cx.observe_new(|workspace: &mut Workspace, _, _| {
-        workspace.register_action(|workspace, _: &OpenAsTab, window, cx| {
-            let tab = ProjectPanelTab::new(workspace, window, cx);
-            workspace.add_item_to_active_pane(Box::new(tab), None, true, window, cx);
-        });
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<ProjectPanel>(window, cx);
         });
@@ -714,7 +709,7 @@ enum RemovalKind {
 }
 
 impl ProjectPanel {
-    fn new(
+    pub fn new(
         workspace: &mut Workspace,
         window: &mut Window,
         cx: &mut Context<Workspace>,
@@ -8350,100 +8345,6 @@ impl ProjectPanel {
             worktree_id: project_path.worktree_id,
             entry_id: entry.id,
         });
-    }
-}
-
-/// The project panel as a tab of a pane. It is a panel of its own, beside
-/// the one of the dock, so that each layout can list the files.
-pub struct ProjectPanelTab {
-    panel: Entity<ProjectPanel>,
-}
-
-impl ProjectPanelTab {
-    fn new(
-        workspace: &mut Workspace,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) -> Entity<Self> {
-        let panel = ProjectPanel::new(workspace, window, cx);
-        cx.new(|_| Self { panel })
-    }
-}
-
-impl EventEmitter<workspace::item::ItemEvent> for ProjectPanelTab {}
-
-impl Focusable for ProjectPanelTab {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.panel.focus_handle(cx)
-    }
-}
-
-impl Render for ProjectPanelTab {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.panel.clone())
-    }
-}
-
-impl workspace::item::Item for ProjectPanelTab {
-    type Event = workspace::item::ItemEvent;
-
-    fn tab_content_text(&self, _detail: usize, _: &App) -> SharedString {
-        "Project".into()
-    }
-
-    fn tab_icon(&self, _: &Window, _: &App) -> Option<Icon> {
-        Some(Icon::new(IconName::FileTree))
-    }
-
-    fn telemetry_event_text(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
-        f(*event)
-    }
-}
-
-impl workspace::item::SerializableItem for ProjectPanelTab {
-    fn serialized_item_kind() -> &'static str {
-        "ProjectPanelTab"
-    }
-
-    fn cleanup(
-        _: workspace::WorkspaceId,
-        _: Vec<workspace::ItemId>,
-        _: &mut Window,
-        _: &mut App,
-    ) -> Task<Result<()>> {
-        Task::ready(Ok(()))
-    }
-
-    fn deserialize(
-        _: Entity<Project>,
-        workspace: WeakEntity<Workspace>,
-        _: workspace::WorkspaceId,
-        _: workspace::ItemId,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Task<Result<Entity<Self>>> {
-        // The tab keeps no state of its own: the panel reads the project.
-        Task::ready(workspace.update(cx, |workspace, cx| {
-            ProjectPanelTab::new(workspace, window, cx)
-        }))
-    }
-
-    fn serialize(
-        &mut self,
-        _: &mut Workspace,
-        _: workspace::ItemId,
-        _: bool,
-        _: &mut Context<Self>,
-    ) -> Option<Task<Result<()>>> {
-        None
-    }
-
-    fn should_serialize(&self, _: &Self::Event) -> bool {
-        false
     }
 }
 

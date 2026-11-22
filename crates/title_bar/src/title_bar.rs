@@ -26,15 +26,14 @@ use crate::application_menu::{
 use auto_update::AutoUpdateStatus;
 #[cfg(feature = "call")]
 use call::ActiveCall;
-#[cfg(feature = "call")]
-use gpui::TaskExt as _;
 use client::{Client, UserStore, zed_urls};
 use command_palette_hooks::CommandPaletteFilter;
+#[cfg(feature = "call")]
+use gpui::TaskExt as _;
 
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, AnyView, App, Context, Element, Entity,
-    Focusable,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    Focusable, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, actions, div,
     pulsating_between,
 };
@@ -57,12 +56,12 @@ use ui::{
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
+#[cfg(feature = "accounts")]
+use workspace::notifications::NotifyResultExt as _;
 use workspace::{
     AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
     notifications::NotifyTaskExt as _,
 };
-#[cfg(feature = "accounts")]
-use workspace::notifications::NotifyResultExt as _;
 
 use zed_actions::OpenRemote;
 
@@ -219,6 +218,8 @@ pub struct TitleBar {
     start_slot: Option<AnyView>,
     center_slot: Option<AnyView>,
     end_slot: Option<AnyView>,
+    project_items_only: bool,
+    open_scope: Option<workspace::OpenScope>,
 }
 
 /// A place in the title bar where another crate can add a view.
@@ -314,6 +315,21 @@ impl Render for TitleBar {
                     project_name = Some(SharedString::from(name));
                 }
             }
+        }
+
+        if self.project_items_only {
+            return h_flex()
+                .gap_0p5()
+                .children(self.render_project_host(cx))
+                .child(self.render_project_name(project_name, window, cx))
+                .when_some(repository.filter(|_| is_git_enabled), |this, repository| {
+                    this.children(self.render_worktree_and_branch(
+                        repository,
+                        linked_worktree_name,
+                        cx,
+                    ))
+                })
+                .into_any_element();
         }
 
         children.push(
@@ -573,6 +589,8 @@ impl TitleBar {
             start_slot: None,
             center_slot: None,
             end_slot: None,
+            project_items_only: false,
+            open_scope: None,
         };
 
         #[cfg(feature = "call")]
@@ -586,6 +604,15 @@ impl TitleBar {
     pub fn set_embedded(&mut self, cx: &mut Context<Self>) {
         self.platform_titlebar
             .update(cx, |titlebar, _| titlebar.set_embedded(true));
+        cx.notify();
+    }
+
+    /// Draws only the project, worktree and branch pickers, as the scope
+    /// picker of a view. A project or worktree picked there goes to
+    /// `open_scope` instead of the window.
+    pub fn set_scope_picker(&mut self, open_scope: workspace::OpenScope, cx: &mut Context<Self>) {
+        self.project_items_only = true;
+        self.open_scope = Some(open_scope);
         cx.notify();
     }
 
@@ -907,16 +934,21 @@ impl TitleBar {
             .map(|mw| mw.read(cx).project_group_keys())
             .unwrap_or_default();
 
+        let open_scope = self.open_scope.clone();
         PopoverMenu::new("recent-projects-menu")
             .menu(move |window, cx| {
-                Some(recent_projects::RecentProjects::popover(
+                let popover = recent_projects::RecentProjects::popover(
                     workspace.clone(),
                     window_project_groups.clone(),
                     None,
                     focus_handle.clone(),
                     window,
                     cx,
-                ))
+                );
+                if let Some(open_scope) = open_scope.clone() {
+                    popover.update(cx, |popover, cx| popover.set_open_scope(open_scope, cx));
+                }
+                Some(popover)
             })
             .trigger_with_tooltip(
                 Button::new("project_name_trigger", display_name)
@@ -1063,13 +1095,23 @@ impl TitleBar {
         let worktree_button = settings.show_worktree_name.then(|| {
             let project = self.project.clone();
             let workspace_handle = workspace.downgrade();
+            let open_scope = self.open_scope.clone();
             PopoverMenu::new("worktree-picker-menu")
                 .menu(move |window, cx| {
                     // When opened from the title bar, focus is on the trigger
                     // button (not a dock), so `focused_dock` is `None`. That's
                     // fine — there's no prior dock focus to restore.
                     Some(cx.new(|cx| {
-                        WorktreePicker::new(project.clone(), workspace_handle.clone(), window, cx)
+                        let mut picker = WorktreePicker::new(
+                            project.clone(),
+                            workspace_handle.clone(),
+                            window,
+                            cx,
+                        );
+                        if let Some(open_scope) = open_scope.clone() {
+                            picker.set_open_scope(open_scope, cx);
+                        }
+                        picker
                     }))
                 })
                 .trigger_with_tooltip(
@@ -1235,7 +1277,9 @@ impl TitleBar {
             client::Status::UpgradeRequired => {
                 let auto_updater = auto_update::AutoUpdater::get(cx);
                 let label = match auto_updater.map(|auto_update| auto_update.read(cx).status()) {
-                    Some(AutoUpdateStatus::Updated { .. }) => "Please restart Zedbench to Collaborate",
+                    Some(AutoUpdateStatus::Updated { .. }) => {
+                        "Please restart Zedbench to Collaborate"
+                    }
                     Some(AutoUpdateStatus::Installing { .. })
                     | Some(AutoUpdateStatus::Downloading { .. })
                     | Some(AutoUpdateStatus::Checking) => "Updating...",
@@ -1386,7 +1430,10 @@ impl TitleBar {
                                     .w_full()
                                     .gap_1()
                                     .justify_between()
-                                    .child(Label::new("Restart to update Zedbench").color(Color::Accent))
+                                    .child(
+                                        Label::new("Restart to update Zedbench")
+                                            .color(Color::Accent),
+                                    )
                                     .child(
                                         Icon::new(IconName::Download)
                                             .size(IconSize::Small)

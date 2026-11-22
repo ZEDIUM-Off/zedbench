@@ -24,6 +24,12 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use util::{ResultExt as _, path_list::PathList};
 
+/// Makes the project at these paths, on this host, the scope of a view,
+/// instead of opening it in the window. A picker that gets one hands it the
+/// project the person picks.
+pub type OpenScope =
+    std::rc::Rc<dyn Fn(PathList, Option<RemoteConnectionOptions>, &mut Window, &mut App)>;
+
 const LAYOUTS_NAMESPACE: &str = "workspace_layouts";
 const FIRST_LAYOUT_NAME: &str = "Main";
 

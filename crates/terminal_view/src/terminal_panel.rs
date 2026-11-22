@@ -87,6 +87,9 @@ pub struct TerminalPanel {
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
     active: bool,
+    /// Lives in a tab of a pane rather than in the dock: it neither saves
+    /// its terminals in place of the dock's nor opens the dock.
+    is_tab: bool,
 }
 
 impl TerminalPanel {
@@ -107,6 +110,7 @@ impl TerminalPanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             active: false,
+            is_tab: false,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
@@ -1047,8 +1051,15 @@ impl TerminalPanel {
         cx.notify();
     }
 
+    /// A terminal panel for a tab of a pane.
+    pub fn new_tab(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new(workspace, window, cx);
+        panel.is_tab = true;
+        panel
+    }
+
     fn serialize(&mut self, cx: &mut Context<Self>) {
-        if self.restoring {
+        if self.restoring || self.is_tab {
             return;
         }
         let Some(serialization_key) = self
@@ -1756,7 +1767,12 @@ impl Panel for TerminalPanel {
                 return;
             };
 
-            this.add_terminal_shell(false, kind, RevealStrategy::Always, window, cx)
+            let reveal = if this.is_tab {
+                RevealStrategy::Never
+            } else {
+                RevealStrategy::Always
+            };
+            this.add_terminal_shell(false, kind, reveal, window, cx)
                 .detach_and_log_err(cx)
         })
     }

@@ -425,10 +425,32 @@ pub mod project_panel {
             /// Toggles the project panel.
             Toggle,
             /// Toggles focus on the project panel.
-            ToggleFocus,
-            /// Opens the files of the project in a tab of the pane on screen,
-            /// beside the project panel of the dock.
-            OpenAsTab,
+            ToggleFocus
+        ]
+    );
+}
+
+pub mod panel_tabs {
+    use gpui::actions;
+
+    actions!(
+        panel_tabs,
+        [
+            /// Opens a project panel in a tab of the pane on screen, with
+            /// its own project.
+            #[action(deprecated_aliases = ["project_panel::OpenAsTab"])]
+            OpenProjectPanel,
+            /// Opens a git panel in a tab of the pane on screen, with its
+            /// own project.
+            OpenGitPanel,
+            /// Opens an outline panel in a tab of the pane on screen.
+            OpenOutlinePanel,
+            /// Opens a terminal panel in a tab of the pane on screen, with
+            /// its own project.
+            OpenTerminalPanel,
+            /// Opens a debug panel in a tab of the pane on screen, with its
+            /// own project.
+            OpenDebugPanel,
         ]
     );
 }

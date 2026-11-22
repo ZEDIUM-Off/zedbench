@@ -4385,7 +4385,23 @@ fn default_render_tab_bar_buttons(
                             .separator()
                             .action(
                                 "Project Panel",
-                                zed_actions::project_panel::OpenAsTab.boxed_clone(),
+                                zed_actions::panel_tabs::OpenProjectPanel.boxed_clone(),
+                            )
+                            .action(
+                                "Git Panel",
+                                zed_actions::panel_tabs::OpenGitPanel.boxed_clone(),
+                            )
+                            .action(
+                                "Outline Panel",
+                                zed_actions::panel_tabs::OpenOutlinePanel.boxed_clone(),
+                            )
+                            .action(
+                                "Terminal Panel",
+                                zed_actions::panel_tabs::OpenTerminalPanel.boxed_clone(),
+                            )
+                            .action(
+                                "Debug Panel",
+                                zed_actions::panel_tabs::OpenDebugPanel.boxed_clone(),
                             )
                             .separator()
                             .action("New Terminal", NewTerminal::default().boxed_clone())

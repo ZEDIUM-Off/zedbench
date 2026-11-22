@@ -754,6 +754,14 @@ impl RecentProjects {
         })
     }
 
+    /// Hands the project the person picks to `open_scope` instead of
+    /// opening it in the window.
+    pub fn set_open_scope(&mut self, open_scope: workspace::OpenScope, cx: &mut Context<Self>) {
+        self.picker.update(cx, |picker, _| {
+            picker.delegate.open_scope = Some(open_scope);
+        });
+    }
+
     fn handle_toggle_open_menu(
         &mut self,
         _: &ToggleActionsMenu,
@@ -867,6 +875,7 @@ pub struct RecentProjectsDelegate {
     focus_handle: FocusHandle,
     style: ProjectPickerStyle,
     actions_menu_handle: PopoverMenuHandle<ContextMenu>,
+    open_scope: Option<workspace::OpenScope>,
 }
 
 impl RecentProjectsDelegate {
@@ -892,6 +901,7 @@ impl RecentProjectsDelegate {
             focus_handle,
             style,
             actions_menu_handle: PopoverMenuHandle::default(),
+            open_scope: None,
         }
     }
 
@@ -1136,6 +1146,12 @@ impl PickerDelegate for RecentProjectsDelegate {
                     return;
                 };
 
+                if let Some(open_scope) = self.open_scope.clone() {
+                    open_scope(key.path_list().clone(), key.host().cloned(), window, cx);
+                    cx.emit(DismissEvent);
+                    return;
+                }
+
                 if secondary && key.host().is_none() && self.window_project_groups.len() >= 2 {
                     move_project_group_to_new_window(key, window, cx);
                     cx.emit(DismissEvent);
@@ -1196,6 +1212,23 @@ impl PickerDelegate for RecentProjectsDelegate {
             }
             Some(ProjectPickerEntry::RecentProject(selected_match)) => {
                 let candidate_id = selected_match.candidate_id;
+                if let Some(open_scope) = self.open_scope.clone()
+                    && let Some(recent) = self.workspaces.get(candidate_id)
+                {
+                    let host = match recent.location.clone() {
+                        SerializedWorkspaceLocation::Local => None,
+                        SerializedWorkspaceLocation::Remote(mut connection) => {
+                            if let RemoteConnectionOptions::Ssh(connection) = &mut connection {
+                                RemoteSettings::get_global(cx)
+                                    .fill_connection_options_from_settings(connection);
+                            }
+                            Some(connection)
+                        }
+                    };
+                    open_scope(recent.paths.clone(), host, window, cx);
+                    cx.emit(DismissEvent);
+                    return;
+                }
                 self.open_recent_projects(candidate_id, secondary, window, cx);
             }
             _ => {}

@@ -1462,6 +1462,15 @@ impl GitPanel {
         Self::new_with_serialized_panel(workspace, None, window, cx)
     }
 
+    /// A git panel for a tab of a pane.
+    pub fn new_tab(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
+        Self::new_with_serialized_panel(workspace, None, window, cx)
+    }
+
     fn new_with_serialized_panel(
         workspace: &mut Workspace,
         serialized_panel: Option<SerializedGitPanel>,

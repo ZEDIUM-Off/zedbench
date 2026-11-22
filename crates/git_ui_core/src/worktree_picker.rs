@@ -61,6 +61,14 @@ impl WorktreePicker {
         Self::new_inner(project, workspace, focused_dock, false, window, cx)
     }
 
+    /// Hands the worktree the person picks to `open_scope` instead of
+    /// switching the window to it.
+    pub fn set_open_scope(&mut self, open_scope: workspace::OpenScope, cx: &mut Context<Self>) {
+        self.picker.update(cx, |picker, _| {
+            picker.delegate.open_scope = Some(open_scope);
+        });
+    }
+
     pub fn new_modal(
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
@@ -132,6 +140,7 @@ impl WorktreePicker {
             hovered_delete_index: None,
             deleting_worktree_paths: HashSet::default(),
             path_style,
+            open_scope: None,
         };
 
         let picker = cx.new(|cx| {
@@ -314,6 +323,7 @@ struct WorktreePickerDelegate {
     hovered_delete_index: Option<usize>,
     deleting_worktree_paths: HashSet<PathBuf>,
     path_style: PathStyle,
+    open_scope: Option<workspace::OpenScope>,
 }
 
 fn worktree_name_anchor<'a>(
@@ -1030,7 +1040,17 @@ impl PickerDelegate for WorktreePickerDelegate {
 
                 let is_current = self.active_worktree_paths.contains(&worktree.path);
 
-                if !is_current {
+                if let Some(open_scope) = self.open_scope.clone()
+                    && !secondary
+                {
+                    let host = self.project.read(cx).remote_connection_options(cx).cloned();
+                    open_scope(
+                        util::path_list::PathList::new(std::slice::from_ref(&worktree.path)),
+                        host,
+                        window,
+                        cx,
+                    );
+                } else if !is_current {
                     if secondary {
                         window.dispatch_action(
                             Box::new(OpenWorktreeInNewWindow {

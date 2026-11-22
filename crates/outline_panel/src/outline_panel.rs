@@ -113,6 +113,9 @@ type OutlineChildren = HashMap<(Range<Anchor>, usize), bool>;
 type HighlightStyleData = Arc<OnceLock<Vec<(Range<usize>, HighlightStyle)>>>;
 
 pub struct OutlinePanel {
+    /// Keeps the outline of the last editor when another item comes on
+    /// screen, as a tab does when it is itself the active item.
+    keeps_last_editor: bool,
     fs: Arc<dyn Fs>,
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
@@ -1060,6 +1063,24 @@ impl OutlinePanel {
         })
     }
 
+    /// An outline panel for a tab of a pane.
+    pub fn new_tab(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
+        let active_editor = workspace_active_editor(workspace, cx);
+        let panel = Self::new(workspace, None, window, cx);
+        panel.update(cx, |panel, cx| {
+            panel.keeps_last_editor = true;
+            panel.active = true;
+            if let Some((item, editor)) = active_editor {
+                panel.replace_active_editor(item, editor, window, cx);
+            }
+        });
+        panel
+    }
+
     fn new(
         workspace: &mut Workspace,
         serialized: Option<&SerializedOutlinePanel>,
@@ -1106,7 +1127,7 @@ impl OutlinePanel {
                                     cx,
                                 );
                             }
-                        } else {
+                        } else if !outline_panel.keeps_last_editor {
                             outline_panel.clear_previous(window, cx);
                             cx.notify();
                         }
@@ -1249,6 +1270,7 @@ impl OutlinePanel {
             let scroll_handle = UniformListScrollHandle::new();
 
             let mut outline_panel = Self {
+                keeps_last_editor: false,
                 mode: ItemsDisplayMode::Outline,
                 active: serialized.and_then(|s| s.active).unwrap_or(false),
                 pinned: false,
@@ -1308,6 +1330,10 @@ impl OutlinePanel {
     }
 
     fn serialize(&mut self, cx: &mut Context<Self>) {
+        // A tab must not save its state in place of the dock's panel.
+        if self.keeps_last_editor {
+            return;
+        }
         let Some(serialization_key) = self
             .workspace
             .read_with(cx, |workspace, _| {

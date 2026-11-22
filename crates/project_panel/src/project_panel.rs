@@ -137,6 +137,9 @@ impl State {
 }
 
 pub struct ProjectPanel {
+    /// The workspace whose panes show the files opened here, when it is not
+    /// the workspace of the project: a tab with a scope of its own.
+    opens_in: Option<WeakEntity<Workspace>>,
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
@@ -902,6 +905,7 @@ impl ProjectPanel {
                 clipboard: None,
                 _dragged_entry_destination: None,
                 workspace: workspace.weak_handle(),
+                opens_in: None,
                 diagnostics: Default::default(),
                 diagnostic_counts: Default::default(),
                 diagnostic_summary_update: Task::ready(()),
@@ -948,6 +952,11 @@ impl ProjectPanel {
                             let worktree_id = worktree.read(cx).id();
                             let entry_id = entry.id;
                             let is_via_ssh = project.read(cx).is_via_remote_server();
+                            let target_pane = project_panel
+                                .upgrade()
+                                .and_then(|panel| panel.read(cx).opens_in.clone())
+                                .and_then(|host| host.upgrade())
+                                .map(|host| host.read(cx).active_pane().downgrade());
 
                             workspace
                                 .open_path_preview(
@@ -955,7 +964,7 @@ impl ProjectPanel {
                                         worktree_id,
                                         path: file_path.clone(),
                                     },
-                                    None,
+                                    target_pane,
                                     focus_opened_item,
                                     allow_preview,
                                     true,
@@ -1030,6 +1039,12 @@ impl ProjectPanel {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             ProjectPanel::new(workspace, window, cx)
         })
+    }
+
+    /// Opens the files of this panel in the panes of `workspace` rather than
+    /// in those of the workspace of its project.
+    pub fn set_opens_in(&mut self, workspace: WeakEntity<Workspace>) {
+        self.opens_in = Some(workspace);
     }
 
     fn update_diagnostics(&mut self, cx: &mut Context<Self>) {

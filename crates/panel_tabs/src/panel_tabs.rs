@@ -28,10 +28,10 @@ use title_bar::TitleBar;
 use ui::{Icon, IconName, prelude::*};
 use util::{ResultExt as _, path_list::PathList};
 use workspace::{
-    ItemId, OpenMode, OpenScope, OpenVisible, SerializableItem, Workspace, WorkspaceDb,
-    WorkspaceId, delete_unloaded_items,
+    ItemId, OpenMode, OpenScope, SerializableItem, Workspace, WorkspaceDb, WorkspaceId,
+    delete_unloaded_items,
     dock::{Panel as _, PanelHandle},
-    item::{Item, ItemEvent},
+    item::{Item, ItemEvent, ItemHandle},
 };
 use zed_actions::panel_tabs::{
     OpenDebugPanel, OpenGitPanel, OpenOutlinePanel, OpenProjectPanel, OpenTerminalPanel,
@@ -270,17 +270,22 @@ impl PanelTab {
                 build_scope_picker(kind, workspace, tab, window, cx),
             )
         });
-        self._subscriptions.clear();
         if kind == PanelKind::Project
             && scope_workspace.downgrade() != self.host
             && let Ok(project_panel) = panel.to_any().downcast::<ProjectPanel>()
         {
-            let project = scope_workspace.read(cx).project().clone();
+            let host = self.host.clone();
+            project_panel.update(cx, |project_panel, _| project_panel.set_opens_in(host));
+        }
+        self._subscriptions.clear();
+        if scope_workspace.downgrade() != self.host {
             self._subscriptions.push(cx.subscribe_in(
-                &project_panel,
+                &scope_workspace,
                 window,
-                move |this, _, event, window, cx| {
-                    this.open_in_host(&project, event, window, cx);
+                |this, scope_workspace, event, window, cx| {
+                    if let workspace::Event::ItemAdded { item } = event {
+                        this.bring_to_host(scope_workspace.clone(), item.boxed_clone(), window, cx);
+                    }
                 },
             ));
         }
@@ -294,56 +299,45 @@ impl PanelTab {
         cx.notify();
     }
 
-    /// A file opened from the project of the tab also opens in the pane on
-    /// screen, when the window reaches it on the same machine.
-    fn open_in_host(
+    /// The workspace of the scope is not on screen: what its panels open
+    /// (a diff, a file, a definition) moves to the pane on screen.
+    fn bring_to_host(
         &mut self,
-        project: &Entity<Project>,
-        event: &project_panel::Event,
+        scope_workspace: Entity<Workspace>,
+        item: Box<dyn ItemHandle>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let project_panel::Event::OpenedEntry {
-            entry_id,
-            focus_opened_item,
-            ..
-        } = event
-        else {
-            return;
-        };
-        let Some(host) = self.host.upgrade() else {
-            return;
-        };
-        let same_machine = host
-            .read(cx)
-            .project()
-            .read(cx)
-            .remote_connection_options(cx)
-            == project.read(cx).remote_connection_options(cx);
-        if !same_machine {
-            return;
-        }
-        let Some(abs_path) = project
-            .read(cx)
-            .path_for_entry(*entry_id, cx)
-            .and_then(|path| project.read(cx).absolute_path(&path, cx))
-        else {
-            return;
-        };
-        let focus = *focus_opened_item;
-        host.update(cx, |workspace, cx| {
-            workspace
-                .open_abs_path(
-                    abs_path,
-                    workspace::OpenOptions {
-                        visible: Some(OpenVisible::None),
-                        focus: Some(focus),
-                        ..Default::default()
-                    },
-                    window,
-                    cx,
-                )
-                .detach_and_log_err(cx);
+        cx.defer_in(window, move |this, window, cx| {
+            let Some(host) = this.host.upgrade() else {
+                return;
+            };
+            let scope_on_screen = host
+                .read(cx)
+                .multi_workspace()
+                .and_then(|multi_workspace| multi_workspace.upgrade())
+                .is_some_and(|multi_workspace| {
+                    multi_workspace.read(cx).workspace() == &scope_workspace
+                });
+            if scope_on_screen {
+                return;
+            }
+            let Some(pane) = scope_workspace
+                .read(cx)
+                .panes()
+                .iter()
+                .find(|pane| pane.read(cx).index_for_item(item.as_ref()).is_some())
+                .cloned()
+            else {
+                return;
+            };
+            pane.update(cx, |pane, cx| {
+                pane.remove_item(item.item_id(), false, false, window, cx);
+            });
+            let host_pane = host.read(cx).active_pane().clone();
+            host_pane.update(cx, |pane, cx| {
+                pane.add_item(item, true, true, None, window, cx);
+            });
         });
     }
 
@@ -650,5 +644,50 @@ mod tests {
             tab.read_with(cx, |tab, cx| tab.tab_content_text(0, cx)),
             "Project · other"
         );
+        let scope_project = tab.read_with(cx, |tab, cx| {
+            tab.scope_workspace
+                .upgrade()
+                .map(|workspace| workspace.read(cx).project().clone())
+                .expect("the tab has a scope")
+        });
+        let worktree_id = scope_project.read_with(cx, |project, cx| {
+            project
+                .worktrees(cx)
+                .next()
+                .map(|worktree| worktree.read(cx).id())
+                .expect("the scope has a worktree")
+        });
+        let project_panel = tab.read_with(cx, |tab, _| {
+            tab.panel_view()
+                .downcast::<ProjectPanel>()
+                .expect("a project tab shows a project panel")
+        });
+        project_panel.update_in(cx, |panel, window, cx| {
+            panel.select_path_for_test(
+                project::ProjectPath {
+                    worktree_id,
+                    path: util::rel_path::rel_path("b.rs").into(),
+                },
+                cx,
+            );
+            window.focus(&panel.focus_handle(cx), cx);
+        });
+        cx.dispatch_action(project_panel::Open);
+        cx.run_until_parked();
+
+        let opened = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+        });
+        assert_eq!(
+            opened.map(|path| (path.worktree_id, path.path)),
+            Some((worktree_id, util::rel_path::rel_path("b.rs").into())),
+            "a file of the scope opens in the pane on screen"
+        );
+        let on_screen = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the window is open");
+        assert_eq!(on_screen, workspace, "the window keeps its own project");
     }
 }

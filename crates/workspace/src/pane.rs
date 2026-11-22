@@ -1086,8 +1086,11 @@ impl Pane {
                 // A preview shown in place of its file stands for that file.
                 let source = crate::in_place_preview::in_place_source(item.item_id(), cx);
                 let file_item = source.as_deref().unwrap_or(&**item);
+                // Entry ids are counted per project: an item of another
+                // project in this pane may have the same id.
                 if file_item.buffer_kind(cx) == ItemBufferKind::Singleton
                     && file_item.project_entry_ids(cx).as_slice() == [project_entry_id]
+                    && file_item.project_path(cx).as_ref() == Some(&project_path)
                 {
                     let item = item.boxed_clone();
                     existing_item = Some((index, item));
@@ -4065,12 +4068,99 @@ impl Pane {
             return;
         }
 
+        if self.open_selection_of_other_project(&dragged_selection.active_selection, window, cx) {
+            return;
+        }
+
         self.handle_project_entry_drop(
             &dragged_selection.active_selection.entry_id,
             dragged_onto,
             window,
             cx,
         );
+    }
+
+    /// Opens here an entry dragged from the panel of another project of the
+    /// window, such as a tab with a scope of its own. Its entry id means
+    /// nothing in the project of this pane: the worktree tells the project.
+    fn open_selection_of_other_project(
+        &mut self,
+        selection: &SelectedEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(project) = self.project.upgrade() else {
+            return false;
+        };
+        if project
+            .read(cx)
+            .worktree_for_id(selection.worktree_id, cx)
+            .is_some()
+        {
+            return false;
+        }
+        let Some(host) = self.workspace.upgrade() else {
+            return false;
+        };
+        let Some(multi_workspace) = host
+            .read(cx)
+            .multi_workspace()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+        else {
+            return false;
+        };
+        let source = multi_workspace.read(cx).workspaces().find_map(|workspace| {
+            let worktree = workspace
+                .read(cx)
+                .project()
+                .read(cx)
+                .worktree_for_id(selection.worktree_id, cx)?;
+            let entry = worktree.read(cx).entry_for_id(selection.entry_id)?;
+            entry.is_file().then(|| {
+                (
+                    workspace.downgrade(),
+                    ProjectPath {
+                        worktree_id: selection.worktree_id,
+                        path: entry.path.clone(),
+                    },
+                )
+            })
+        });
+        let Some((source, project_path)) = source else {
+            return false;
+        };
+        let to_pane = cx.entity();
+        let split_direction = self.drag_split_direction;
+        let host = host.downgrade();
+        cx.defer_in(window, move |_, window, cx| {
+            let to_pane = match split_direction {
+                Some(direction) => host
+                    .update(cx, |host, cx| {
+                        host.split_pane(to_pane, direction, window, cx)
+                    })
+                    .ok(),
+                None => Some(to_pane),
+            };
+            let Some(to_pane) = to_pane else {
+                return;
+            };
+            source
+                .update(cx, |source, cx| {
+                    source
+                        .open_path_preview(
+                            project_path,
+                            Some(to_pane.downgrade()),
+                            true,
+                            false,
+                            true,
+                            window,
+                            cx,
+                        )
+                        .detach_and_log_err(cx);
+                })
+                .log_err();
+        });
+        true
     }
 
     fn handle_project_entry_drop(

@@ -4383,6 +4383,11 @@ fn default_render_tab_bar_buttons(
                             .action("Search Project", DeploySearch::default().boxed_clone())
                             .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
                             .separator()
+                            .action(
+                                "Project Panel",
+                                zed_actions::project_panel::OpenAsTab.boxed_clone(),
+                            )
+                            .separator()
                             .action("New Terminal", NewTerminal::default().boxed_clone())
                             .action(
                                 "New Center Terminal",

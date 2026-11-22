@@ -425,7 +425,10 @@ pub mod project_panel {
             /// Toggles the project panel.
             Toggle,
             /// Toggles focus on the project panel.
-            ToggleFocus
+            ToggleFocus,
+            /// Opens the files of the project in a tab of the pane on screen,
+            /// beside the project panel of the dock.
+            OpenAsTab,
         ]
     );
 }

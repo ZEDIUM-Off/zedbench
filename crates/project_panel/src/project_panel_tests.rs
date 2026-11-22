@@ -124,6 +124,36 @@ async fn test_visible_list(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_the_files_open_in_a_tab(cx: &mut gpui::TestAppContext) {
+    init_test_with_editor(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/src"), json!({ "first.rs": "" }))
+        .await;
+    let project = Project::test(fs.clone(), [path!("/src").as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    cx.dispatch_action(zed_actions::project_panel::OpenAsTab);
+    cx.run_until_parked();
+    let panel = workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_item_as::<ProjectPanelTab>(cx)
+            .expect("the project tab is active")
+            .read(cx)
+            .panel
+            .clone()
+    });
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..10, cx),
+        &["v src", "      first.rs"]
+    );
+}
+
+#[gpui::test]
 async fn test_opening_file(cx: &mut gpui::TestAppContext) {
     init_test_with_editor(cx);
 

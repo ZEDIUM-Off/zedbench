@@ -1462,13 +1462,19 @@ impl GitPanel {
         Self::new_with_serialized_panel(workspace, None, window, cx)
     }
 
-    /// A git panel for a tab of a pane.
+    pub fn project(&self) -> &Entity<Project> {
+        &self.project
+    }
+
+    /// A git panel of `project` for a tab of a pane of `workspace`, whose
+    /// project may be another: a tab with a scope of its own.
     pub fn new_tab(
         workspace: &mut Workspace,
+        project: Entity<Project>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
-        Self::new_with_serialized_panel(workspace, None, window, cx)
+        Self::new_in_project(workspace, project, None, window, cx)
     }
 
     fn new_with_serialized_panel(
@@ -1478,6 +1484,16 @@ impl GitPanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let project = workspace.project().clone();
+        Self::new_in_project(workspace, project, serialized_panel, window, cx)
+    }
+
+    fn new_in_project(
+        workspace: &mut Workspace,
+        project: Entity<Project>,
+        serialized_panel: Option<SerializedGitPanel>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
         let app_state = workspace.app_state().clone();
         let fs = app_state.fs.clone();
         let git_store = project.read(cx).git_store().clone();
@@ -2915,9 +2931,11 @@ impl GitPanel {
             let git_repo = self.active_repository.as_ref()?;
             let target =
                 Self::diff_target_for_section(self.section_for_entry_index(selected_index));
+            let project = self.project.clone();
 
             if target == DiffTarget::Uncommitted
                 && let Some(project_diff) = workspace.read(cx).active_item_as::<ProjectDiff>(cx)
+                && project_diff.read(cx).project == self.project
                 && let Some(project_path) = project_diff.read(cx).active_project_path(cx)
                 && Some(&entry.repo_path)
                     == git_repo
@@ -2933,13 +2951,31 @@ impl GitPanel {
             self.workspace
                 .update(cx, |workspace, cx| match target {
                     DiffTarget::Uncommitted => {
-                        ProjectDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
+                        ProjectDiff::deploy_at_in_project(
+                            workspace,
+                            project.clone(),
+                            Some(entry.clone()),
+                            window,
+                            cx,
+                        );
                     }
                     DiffTarget::Staged => {
-                        StagedDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
+                        StagedDiff::deploy_at_in_project(
+                            workspace,
+                            project.clone(),
+                            Some(entry.clone()),
+                            window,
+                            cx,
+                        );
                     }
                     DiffTarget::Unstaged => {
-                        UnstagedDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
+                        UnstagedDiff::deploy_at_in_project(
+                            workspace,
+                            project.clone(),
+                            Some(entry.clone()),
+                            window,
+                            cx,
+                        );
                     }
                 })
                 .ok();
@@ -3456,14 +3492,13 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace = self.workspace.clone();
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
 
         let task = cx.spawn_in(window, async move |this, cx| {
-            let tasks: Vec<_> = workspace.update(cx, |workspace, cx| {
-                workspace.project().update(cx, |project, cx| {
+            let tasks: Vec<_> = this.update(cx, |this, cx| {
+                this.project.update(cx, |project, cx| {
                     targets
                         .iter()
                         .filter_map(|target| {
@@ -3599,7 +3634,6 @@ impl GitPanel {
     }
 
     fn clean_all(&mut self, _: &TrashUntrackedFiles, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
         let Some(active_repo) = self.active_repository.clone() else {
             return;
         };
@@ -3642,16 +3676,16 @@ impl GitPanel {
         }
 
         let prompt = prompt("Trash these files?", Some(&details), window, cx);
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             match prompt.await? {
                 TrashCancel::Trash => {}
                 TrashCancel::Cancel => return Ok(()),
             }
-            let tasks = workspace.update(cx, |workspace, cx| {
+            let tasks = this.update(cx, |this, cx| {
                 to_delete
                     .iter()
                     .filter_map(|entry| {
-                        workspace.project().update(cx, |project, cx| {
+                        this.project.update(cx, |project, cx| {
                             let project_path = active_repo
                                 .read(cx)
                                 .repo_path_to_project_path(&entry.repo_path, cx)?;
@@ -5652,8 +5686,9 @@ impl GitPanel {
                 .cloned()
         };
         if let Some(workspace) = self.workspace.upgrade() {
+            let project = self.project.clone();
             workspace.update(cx, |workspace, cx| {
-                StagedDiff::deploy_at(workspace, entry, window, cx);
+                StagedDiff::deploy_at_in_project(workspace, project, entry, window, cx);
             });
         }
     }
@@ -5672,8 +5707,9 @@ impl GitPanel {
                 .cloned()
         };
         if let Some(workspace) = self.workspace.upgrade() {
+            let project = self.project.clone();
             workspace.update(cx, |workspace, cx| {
-                UnstagedDiff::deploy_at(workspace, entry, window, cx);
+                UnstagedDiff::deploy_at_in_project(workspace, project, entry, window, cx);
             });
         }
     }
@@ -9994,19 +10030,46 @@ impl Render for GitPanel {
             .key_context(self.dispatch_context(window, cx))
             .track_focus(&self.focus_handle)
             .when(has_write_access && !project.is_read_only(cx), |this| {
-                this.on_action(cx.listener(GitPanel::on_commit))
-                    .on_action(cx.listener(GitPanel::toggle_skip_hooks))
-                    .on_action(cx.listener(GitPanel::on_amend))
-                    .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
-                    .on_action(cx.listener(Self::stage_all))
-                    .on_action(cx.listener(Self::unstage_all))
-                    .on_action(cx.listener(Self::restore_tracked_files))
-                    .on_action(cx.listener(Self::clean_all))
-                    .on_action(cx.listener(Self::generate_commit_message_action))
-                    .on_action(cx.listener(Self::stash_all))
-                    .on_action(cx.listener(Self::stash_tracked))
-                    .on_action(cx.listener(Self::stash_staged))
-                    .on_action(cx.listener(Self::stash_pop))
+                // The workspace sends these to the panel of its dock; a panel
+                // in a tab with a scope of its own acts on its own project.
+                this.on_action(
+                    cx.listener(|this, _: &git::Fetch, window, cx| this.fetch(true, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &git::FetchFrom, window, cx| {
+                        this.fetch(false, window, cx)
+                    }),
+                )
+                .on_action(cx.listener(|this, _: &git::Push, window, cx| {
+                    this.push(false, false, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &git::PushTo, window, cx| {
+                    this.push(false, true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &git::ForcePush, window, cx| {
+                    this.push(true, false, window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &git::Pull, window, cx| this.pull(false, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &git::PullRebase, window, cx| {
+                        this.pull(true, window, cx)
+                    }),
+                )
+                .on_action(cx.listener(GitPanel::on_commit))
+                .on_action(cx.listener(GitPanel::toggle_skip_hooks))
+                .on_action(cx.listener(GitPanel::on_amend))
+                .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
+                .on_action(cx.listener(Self::stage_all))
+                .on_action(cx.listener(Self::unstage_all))
+                .on_action(cx.listener(Self::restore_tracked_files))
+                .on_action(cx.listener(Self::clean_all))
+                .on_action(cx.listener(Self::generate_commit_message_action))
+                .on_action(cx.listener(Self::stash_all))
+                .on_action(cx.listener(Self::stash_tracked))
+                .on_action(cx.listener(Self::stash_staged))
+                .on_action(cx.listener(Self::stash_pop))
             })
             .when(can_stage_rows, |this| {
                 this.on_action(cx.listener(Self::toggle_staged_for_selected))

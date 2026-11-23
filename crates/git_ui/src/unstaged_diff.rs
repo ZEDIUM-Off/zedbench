@@ -136,6 +136,19 @@ impl UnstagedDiff {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        let project = workspace.project().clone();
+        Self::deploy_at_in_project(workspace, project, entry, window, cx)
+    }
+
+    /// Shows the changes of `project`, which may be another project than the
+    /// one of the workspace: a git panel with a scope of its own.
+    pub fn deploy_at_in_project(
+        workspace: &mut Workspace,
+        project: Entity<Project>,
+        entry: Option<GitStatusEntry>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
         telemetry::event!(
             "Git Unstaged Diff Opened",
             source = if entry.is_some() {
@@ -144,15 +157,17 @@ impl UnstagedDiff {
                 "Action"
             }
         );
-        let intended_repo = workspace.project().read(cx).active_repository(cx);
-        let existing = workspace.items_of_type::<Self>(cx).next();
+        let intended_repo = project.read(cx).active_repository(cx);
+        let existing = workspace
+            .items_of_type::<Self>(cx)
+            .find(|existing| existing.read(cx).project == project);
         let unstaged_diff = if let Some(existing) = existing {
             workspace.activate_item(&existing, true, true, window, cx);
             existing
         } else {
             let workspace_handle = cx.entity();
             let unstaged_diff =
-                cx.new(|cx| Self::new(workspace.project().clone(), workspace_handle, window, cx));
+                cx.new(|cx| Self::new(project.clone(), workspace_handle, window, cx));
             workspace.add_item_to_active_pane(
                 Box::new(unstaged_diff.clone()),
                 None,

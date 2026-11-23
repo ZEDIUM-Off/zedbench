@@ -949,7 +949,7 @@ impl<T: Item> ItemHandle for Entity<T> {
                                     move |workspace, window, cx| {
                                         Pane::autosave_item(
                                             &item,
-                                            workspace.project().clone(),
+                                            workspace.project_for_item(&item, cx),
                                             window,
                                             cx,
                                         )

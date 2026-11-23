@@ -67,7 +67,7 @@ actions!(
 pub(crate) struct DeployBranchDiff;
 
 pub struct ProjectDiff {
-    project: Entity<Project>,
+    pub(crate) project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
     diff: Entity<DiffMultibuffer>,
     _diff_event_subscription: Subscription,
@@ -128,8 +128,25 @@ impl ProjectDiff {
         Self::deploy_at(workspace, None, window, cx)
     }
 
+    pub fn project(&self) -> &Entity<Project> {
+        &self.project
+    }
+
     pub fn deploy_at(
         workspace: &mut Workspace,
+        entry: Option<GitStatusEntry>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let project = workspace.project().clone();
+        Self::deploy_at_in_project(workspace, project, entry, window, cx)
+    }
+
+    /// Shows the changes of `project`, which may be another project than the
+    /// one of the workspace: a git panel with a scope of its own.
+    pub fn deploy_at_in_project(
+        workspace: &mut Workspace,
+        project: Entity<Project>,
         entry: Option<GitStatusEntry>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
@@ -142,9 +159,11 @@ impl ProjectDiff {
                 "Action"
             }
         );
-        let intended_repo = workspace.project().read(cx).active_repository(cx);
+        let intended_repo = project.read(cx).active_repository(cx);
 
-        let existing = workspace.items_of_type::<Self>(cx).next();
+        let existing = workspace
+            .items_of_type::<Self>(cx)
+            .find(|existing| existing.read(cx).project == project);
         let project_diff = if let Some(existing) = existing {
             existing.update(cx, |project_diff, cx| {
                 project_diff.move_to_beginning(window, cx);
@@ -155,7 +174,7 @@ impl ProjectDiff {
         } else {
             let workspace_handle = cx.entity();
             let project_diff =
-                cx.new(|cx| Self::new(workspace.project().clone(), workspace_handle, window, cx));
+                cx.new(|cx| Self::new(project.clone(), workspace_handle, window, cx));
             workspace.add_item_to_active_pane(
                 Box::new(project_diff.clone()),
                 None,

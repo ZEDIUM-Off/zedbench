@@ -14445,6 +14445,7 @@ dependencies = [
  "editor",
  "git_ui",
  "gpui",
+ "language_model",
  "outline_panel",
  "project",
  "project_panel",

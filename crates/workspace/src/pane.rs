@@ -2272,6 +2272,14 @@ impl Pane {
 
         const DELETED_MESSAGE: &str = "This file has been deleted on disk since you started editing it. Do you want to recreate it?";
 
+        // An item of a view with a scope of its own saves in its own project.
+        let project = pane
+            .read_with(cx, |pane, cx| {
+                pane.workspace
+                    .upgrade()
+                    .map(|workspace| workspace.read(cx).project_for_item(item, cx))
+            })
+            .unwrap_or(project);
         let path_style = project.read_with(cx, |project, cx| project.path_style(cx));
         if save_intent == SaveIntent::Skip {
             let is_saveable_singleton = cx.update(|_window, cx| {
@@ -4081,7 +4089,7 @@ impl Pane {
     }
 
     /// Opens here an entry dragged from the panel of another project of the
-    /// window, such as a tab with a scope of its own. Its entry id means
+    /// workspace, such as a tab with a scope of its own. Its entry id means
     /// nothing in the project of this pane: the worktree tells the project.
     fn open_selection_of_other_project(
         &mut self,
@@ -4089,76 +4097,49 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(project) = self.project.upgrade() else {
-            return false;
-        };
-        if project
-            .read(cx)
-            .worktree_for_id(selection.worktree_id, cx)
-            .is_some()
-        {
-            return false;
-        }
         let Some(host) = self.workspace.upgrade() else {
             return false;
         };
-        let Some(multi_workspace) = host
+        let source = host
             .read(cx)
-            .multi_workspace()
-            .and_then(|multi_workspace| multi_workspace.upgrade())
-        else {
+            .project_for_worktree(selection.worktree_id, cx);
+        if self.project == source.downgrade() {
             return false;
-        };
-        let source = multi_workspace.read(cx).workspaces().find_map(|workspace| {
-            let worktree = workspace
-                .read(cx)
-                .project()
-                .read(cx)
-                .worktree_for_id(selection.worktree_id, cx)?;
-            let entry = worktree.read(cx).entry_for_id(selection.entry_id)?;
-            entry.is_file().then(|| {
-                (
-                    workspace.downgrade(),
-                    ProjectPath {
-                        worktree_id: selection.worktree_id,
-                        path: entry.path.clone(),
-                    },
-                )
+        }
+        let Some(project_path) = source
+            .read(cx)
+            .worktree_for_id(selection.worktree_id, cx)
+            .and_then(|worktree| {
+                let entry = worktree.read(cx).entry_for_id(selection.entry_id)?;
+                entry.is_file().then(|| ProjectPath {
+                    worktree_id: selection.worktree_id,
+                    path: entry.path.clone(),
+                })
             })
-        });
-        let Some((source, project_path)) = source else {
+        else {
             return false;
         };
         let to_pane = cx.entity();
         let split_direction = self.drag_split_direction;
         let host = host.downgrade();
         cx.defer_in(window, move |_, window, cx| {
-            let to_pane = match split_direction {
-                Some(direction) => host
-                    .update(cx, |host, cx| {
-                        host.split_pane(to_pane, direction, window, cx)
-                    })
-                    .ok(),
-                None => Some(to_pane),
-            };
-            let Some(to_pane) = to_pane else {
-                return;
-            };
-            source
-                .update(cx, |source, cx| {
-                    source
-                        .open_path_preview(
-                            project_path,
-                            Some(to_pane.downgrade()),
-                            true,
-                            false,
-                            true,
-                            window,
-                            cx,
-                        )
-                        .detach_and_log_err(cx);
-                })
-                .log_err();
+            host.update(cx, |host, cx| {
+                let to_pane = match split_direction {
+                    Some(direction) => host.split_pane(to_pane, direction, window, cx),
+                    None => to_pane,
+                };
+                host.open_path_preview(
+                    project_path,
+                    Some(to_pane.downgrade()),
+                    true,
+                    false,
+                    true,
+                    window,
+                    cx,
+                )
+                .detach_and_log_err(cx);
+            })
+            .log_err();
         });
         true
     }

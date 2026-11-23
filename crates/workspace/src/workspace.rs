@@ -1757,6 +1757,10 @@ pub struct Workspace {
     persisted_recent_navigation_history: Vec<PathBuf>,
     last_active_project_path: Option<ProjectPath>,
     restoring_workspace: bool,
+    /// The projects of the views that have a scope of their own, such as a
+    /// panel tab on another folder or machine. Their items open in the panes
+    /// of this workspace and keep their project.
+    scope_projects: Vec<WeakEntity<Project>>,
 }
 
 impl EventEmitter<Event> for Workspace {}
@@ -2261,6 +2265,7 @@ impl Workspace {
             persisted_recent_navigation_history: Vec::new(),
             last_active_project_path: None,
             restoring_workspace: false,
+            scope_projects: Vec::new(),
         }
     }
 
@@ -5371,11 +5376,12 @@ impl Workspace {
                     return false;
                 }
 
-                if let Some(project_entry_id) = project_entry_id {
-                    item.project_entry_ids(cx).as_slice() == [project_entry_id]
-                } else {
-                    item.project_path(cx).as_ref() == Some(project_path)
-                }
+                // Entry ids are counted per project: the path tells the
+                // project too.
+                item.project_path(cx).as_ref() == Some(project_path)
+                    && project_entry_id.is_none_or(|project_entry_id| {
+                        item.project_entry_ids(cx).as_slice() == [project_entry_id]
+                    })
             })
         };
 
@@ -5654,7 +5660,8 @@ impl Workspace {
         cx: &mut App,
     ) -> Task<Result<(Option<ProjectEntryId>, WorkspaceItemBuilder)>> {
         let registry = cx.default_global::<ProjectItemRegistry>().clone();
-        registry.open_path(self.project(), &path, window, cx)
+        let project = self.project_for_worktree(path.worktree_id, cx);
+        registry.open_path(&project, &path, window, cx)
     }
 
     pub fn find_project_item<T>(
@@ -5671,15 +5678,13 @@ impl Workspace {
         let entry_id = project_item.entry_id(cx);
         let project_path = project_item.project_path(cx);
 
-        let mut item = None;
-        if let Some(entry_id) = entry_id {
-            item = pane.read(cx).item_for_entry(entry_id, cx);
-        }
-        if item.is_none()
-            && let Some(project_path) = project_path
-        {
-            item = pane.read(cx).item_for_path(project_path, cx);
-        }
+        // Entry ids are counted per project, while a path names its
+        // project: an item of another project may have the same entry id.
+        let item = match (project_path, entry_id) {
+            (Some(project_path), _) => pane.read(cx).item_for_path(project_path, cx),
+            (None, Some(entry_id)) => pane.read(cx).item_for_entry(entry_id, cx),
+            (None, None) => None,
+        };
 
         item.and_then(|item| item.downcast::<T>())
     }
@@ -5759,10 +5764,15 @@ impl Workspace {
             return item;
         }
 
+        let project = {
+            use project::ProjectItem as _;
+            match project_item.read(cx).project_path(cx) {
+                Some(project_path) => self.project_for_worktree(project_path.worktree_id, cx),
+                None => self.project.clone(),
+            }
+        };
         let item = pane.update(cx, |pane, cx| {
-            cx.new(|cx| {
-                T::for_project_item(self.project().clone(), Some(pane), project_item, window, cx)
-            })
+            cx.new(|cx| T::for_project_item(project, Some(pane), project_item, window, cx))
         });
         let mut destination_index = None;
         pane.update(cx, |pane, cx| {
@@ -6396,8 +6406,13 @@ impl Workspace {
             if focus_handle.contains_focused(window, cx) {
                 continue;
             }
-            Pane::autosave_item(item.as_ref(), self.project.clone(), window, cx)
-                .detach_and_log_err(cx);
+            Pane::autosave_item(
+                item.as_ref(),
+                self.project_for_item(item.as_ref(), cx),
+                window,
+                cx,
+            )
+            .detach_and_log_err(cx);
         }
     }
 
@@ -6971,6 +6986,17 @@ impl Workspace {
         self.project.update(cx, |project, cx| {
             project.set_active_path(active_entry.clone(), cx)
         });
+        // The item may belong to the project of a view with a scope of its
+        // own: that project follows it for its language servers and git.
+        let item_project = active_entry
+            .as_ref()
+            .map(|project_path| self.project_for_worktree(project_path.worktree_id, cx))
+            .filter(|item_project| item_project != &self.project);
+        if let Some(item_project) = &item_project {
+            item_project.update(cx, |project, cx| {
+                project.set_active_path(active_entry.clone(), cx)
+            });
+        }
 
         // Infer the active repository only from singleton items.
         // A multibuffer's active path represents the cursor's location within
@@ -6982,7 +7008,12 @@ impl Workspace {
                 .active_item(cx)
                 .is_some_and(|item| item.buffer_kind(cx) == ItemBufferKind::Singleton)
         {
-            let git_store_entity = self.project.read(cx).git_store().clone();
+            let git_store_entity = item_project
+                .as_ref()
+                .unwrap_or(&self.project)
+                .read(cx)
+                .git_store()
+                .clone();
             git_store_entity.update(cx, |git_store, cx| {
                 git_store.set_active_repo_for_path(project_path, cx);
             });
@@ -7812,8 +7843,13 @@ impl Workspace {
                             item.workspace_settings(cx).autosave,
                             AutosaveSetting::OnWindowChange | AutosaveSetting::OnFocusChange
                         ) {
-                            Pane::autosave_item(item.as_ref(), self.project.clone(), window, cx)
-                                .detach_and_log_err(cx);
+                            Pane::autosave_item(
+                                item.as_ref(),
+                                self.project_for_item(item.as_ref(), cx),
+                                window,
+                                cx,
+                            )
+                            .detach_and_log_err(cx);
                         }
                     }
                 });
@@ -7953,6 +7989,72 @@ impl Workspace {
                 result.log_err();
             }
         })
+    }
+
+    /// Lets the items of `project` open in the panes of this workspace.
+    pub fn add_scope_project(&mut self, project: &Entity<Project>) {
+        self.scope_projects
+            .retain(|scope_project| scope_project.upgrade().is_some());
+        if project != &self.project
+            && !self
+                .scope_projects
+                .iter()
+                .any(|scope_project| scope_project == &project.downgrade())
+        {
+            self.scope_projects.push(project.downgrade());
+        }
+    }
+
+    /// The scope project at exactly these paths on this host.
+    pub fn scope_project(
+        &self,
+        paths: &PathList,
+        remote: Option<&RemoteConnectionOptions>,
+        cx: &App,
+    ) -> Option<Entity<Project>> {
+        self.scope_projects
+            .iter()
+            .filter_map(|scope_project| scope_project.upgrade())
+            .find(|scope_project| {
+                let scope_project = scope_project.read(cx);
+                let roots = scope_project
+                    .visible_worktrees(cx)
+                    .map(|worktree| worktree.read(cx).abs_path())
+                    .collect::<Vec<_>>();
+                PathList::new(&roots) == *paths
+                    && scope_project.remote_connection_options(cx) == remote
+            })
+    }
+
+    /// The project that holds the worktree. Worktree ids are unique in the
+    /// whole application, so they tell the project of a path.
+    pub fn project_for_worktree(&self, worktree_id: WorktreeId, cx: &App) -> Entity<Project> {
+        if self
+            .project
+            .read(cx)
+            .worktree_for_id(worktree_id, cx)
+            .is_some()
+        {
+            return self.project.clone();
+        }
+        self.scope_projects
+            .iter()
+            .filter_map(|scope_project| scope_project.upgrade())
+            .find(|scope_project| {
+                scope_project
+                    .read(cx)
+                    .worktree_for_id(worktree_id, cx)
+                    .is_some()
+            })
+            .unwrap_or_else(|| self.project.clone())
+    }
+
+    /// The project that saves and reloads the item.
+    pub fn project_for_item(&self, item: &dyn ItemHandle, cx: &App) -> Entity<Project> {
+        match item.project_paths(cx).first() {
+            Some(project_path) => self.project_for_worktree(project_path.worktree_id, cx),
+            None => self.project.clone(),
+        }
     }
 
     pub fn root_paths(&self, cx: &App) -> Vec<Arc<Path>> {

@@ -504,6 +504,19 @@ impl TitleBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let project = workspace.project().clone();
+        Self::new_in_project(id, workspace, project, multi_workspace, window, cx)
+    }
+
+    /// A title bar that shows `project`, which may be another project than
+    /// the one of the workspace: the scope picker of a view.
+    pub fn new_in_project(
+        id: impl Into<ElementId>,
+        workspace: &Workspace,
+        project: Entity<Project>,
+        multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let git_store = project.read(cx).git_store().clone();
         let user_store = workspace.app_state().user_store.clone();
         let client = workspace.app_state().client.clone();

@@ -12,12 +12,12 @@ use db::{
 use debugger_ui::debugger_panel::DebugPanel;
 use git_ui::git_panel::GitPanel;
 use gpui::{
-    AnyView, App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task,
-    WeakEntity, Window, div,
+    AnyView, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window,
+    div,
 };
 use outline_panel::OutlinePanel;
-use project::Project;
+use project::{LocalProjectFlags, Project};
 use project_panel::ProjectPanel;
 use remote::RemoteConnectionOptions;
 use serde::{Deserialize, Serialize};
@@ -28,10 +28,10 @@ use title_bar::TitleBar;
 use ui::{Icon, IconName, prelude::*};
 use util::{ResultExt as _, path_list::PathList};
 use workspace::{
-    ItemId, MultiWorkspace, OpenMode, OpenScope, SerializableItem, Workspace, WorkspaceDb,
-    WorkspaceId, delete_unloaded_items,
+    ItemId, OpenScope, SerializableItem, Workspace, WorkspaceDb, WorkspaceId,
+    delete_unloaded_items,
     dock::{Panel as _, PanelHandle},
-    item::{Item, ItemEvent, ItemHandle},
+    item::{Item, ItemEvent},
 };
 use zed_actions::panel_tabs::{
     OpenDebugPanel, OpenGitPanel, OpenOutlinePanel, OpenProjectPanel, OpenTerminalPanel,
@@ -100,8 +100,10 @@ impl PanelKind {
     }
 
     /// The outline follows the editor on screen: it has no project to pick.
+    /// Terminals and the debugger run in the project of the window until
+    /// they get a scope of their own.
     fn has_scope(self) -> bool {
-        self != PanelKind::Outline
+        matches!(self, PanelKind::Project | PanelKind::Git)
     }
 }
 
@@ -121,16 +123,16 @@ struct SerializedPanelTab {
 pub struct PanelTab {
     kind: PanelKind,
     /// The workspace whose pane holds the tab.
-    host: WeakEntity<Workspace>,
-    /// The workspace of the scope: the host, or one that the window keeps
-    /// in the background for this project.
-    scope_workspace: WeakEntity<Workspace>,
+    workspace: WeakEntity<Workspace>,
+    /// The project the tab shows: the project of the workspace, or the one of
+    /// its scope. What the tab opens goes to the panes of the workspace and
+    /// keeps this project.
+    project: Entity<Project>,
     scope: Option<TabScope>,
     panel: Arc<dyn PanelHandle>,
     scope_picker: Option<Entity<TitleBar>>,
     workspace_id: Option<WorkspaceId>,
     pending_scope: Option<Task<()>>,
-    _subscriptions: Vec<Subscription>,
 }
 
 impl PanelTab {
@@ -140,21 +142,22 @@ impl PanelTab {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
-        let panel = build_panel(kind, workspace, window, cx);
-        let host = cx.entity().downgrade();
+        let project = workspace.project().clone();
+        let panel = build_panel(kind, workspace, project.clone(), window, cx);
         let workspace_id = workspace.database_id();
+        let workspace_handle = workspace.weak_handle();
         let tab = cx.new(|_| Self {
             kind,
-            host: host.clone(),
-            scope_workspace: host,
+            workspace: workspace_handle,
+            project: project.clone(),
             scope: None,
             panel,
             scope_picker: None,
             workspace_id,
             pending_scope: None,
-            _subscriptions: Vec::new(),
         });
-        let scope_picker = build_scope_picker(kind, workspace, tab.downgrade(), window, cx);
+        let scope_picker =
+            build_scope_picker(kind, workspace, project, tab.downgrade(), window, cx);
         tab.update(cx, |tab, _| tab.scope_picker = scope_picker);
         tab
     }
@@ -167,12 +170,17 @@ impl PanelTab {
         self.scope.as_ref()
     }
 
+    pub fn project(&self) -> &Entity<Project> {
+        &self.project
+    }
+
     pub fn panel_view(&self) -> AnyView {
         self.panel.to_any()
     }
 
-    /// Shows the project at `paths` in this tab. The window keeps showing
-    /// its own project.
+    /// Shows the project at `paths`, on this host, in this tab. The window
+    /// keeps its own project, and no other workspace opens: the project of
+    /// the scope lives as long as a tab shows it.
     pub fn set_scope(
         &mut self,
         paths: PathList,
@@ -180,171 +188,128 @@ impl PanelTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.host.upgrade() else {
+        if !self.kind.has_scope() {
+            return;
+        }
+        let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let host_paths = PathList::new(&host.read(cx).root_paths(cx));
-        let host_remote = host
-            .read(cx)
-            .project()
+        let window_project = workspace.read(cx).project().clone();
+        let window_paths = PathList::new(&workspace.read(cx).root_paths(cx));
+        let window_remote = window_project
             .read(cx)
             .remote_connection_options(cx)
             .cloned();
-        if host_paths == paths && host_remote == remote {
+        if window_paths == paths && window_remote == remote {
             self.scope = None;
-            self.show_workspace(host, window, cx);
+            self.show_project(window_project, window, cx);
             return;
         }
         let scope = TabScope {
             paths: paths.paths().to_vec(),
             remote: remote.clone(),
         };
-        let Some(multi_workspace) = host
+        if let Some(project) = workspace
             .read(cx)
-            .multi_workspace()
-            .and_then(|multi_workspace| multi_workspace.upgrade())
-        else {
-            return;
-        };
-        if let Some(existing) =
-            multi_workspace
-                .read(cx)
-                .workspace_for_paths(&paths, remote.as_ref(), cx)
+            .scope_project(&paths, remote.as_ref(), cx)
         {
             self.scope = Some(scope);
-            self.show_workspace(existing, window, cx);
+            self.show_project(project, window, cx);
             return;
         }
-        // A new workspace takes the focus of the window, but the person stays
-        // on this tab.
-        let focused = window.focused(cx);
-        let open: Task<Result<Entity<Workspace>>> = if remote.is_none() {
-            // The open of the title bar would bring a project that the window
-            // already holds on screen: the tab opens it in the background.
-            let opening = Workspace::new_local(
-                paths.paths().to_vec(),
-                host.read(cx).app_state().clone(),
-                window.window_handle().downcast::<MultiWorkspace>(),
-                None,
-                None,
-                OpenMode::Add,
-                cx,
-            );
-            cx.spawn(async move |_, _| Ok(opening.await?.workspace))
-        } else {
-            multi_workspace.update(cx, |multi_workspace, cx| {
-                let host = host.clone();
-                multi_workspace.find_or_create_workspace(
-                    paths,
-                    remote,
-                    None,
-                    move |options, window, cx| {
-                        remote_connection::connect_with_modal(&host, options, window, cx)
-                    },
-                    None,
-                    OpenMode::Add,
-                    None,
-                    window,
-                    cx,
-                )
-            })
-        };
+
+        let app_state = workspace.read(cx).app_state().clone();
+        let connect = remote
+            .map(|options| remote_connection::connect_with_modal(&workspace, options, window, cx));
         self.pending_scope = Some(cx.spawn_in(window, async move |this, cx| {
-            let opened = open.await;
-            remote_connection::dismiss_connection_modal(&host, cx);
-            let Some(scope_workspace) = opened.context("opening the scope of a tab").log_err()
-            else {
+            let opened = async {
+                let project = match connect {
+                    None => cx.update(|_, cx| {
+                        Project::local(
+                            app_state.client.clone(),
+                            app_state.node_runtime.clone(),
+                            app_state.user_store.clone(),
+                            app_state.languages.clone(),
+                            app_state.fs.clone(),
+                            None,
+                            LocalProjectFlags::default(),
+                            cx,
+                        )
+                    })?,
+                    Some(connect) => {
+                        let connected = connect.await;
+                        remote_connection::dismiss_connection_modal(&workspace, cx);
+                        let session = connected?.context("the connection was cancelled")?;
+                        cx.update(|_, cx| {
+                            Project::remote(
+                                session,
+                                app_state.client.clone(),
+                                app_state.node_runtime.clone(),
+                                app_state.user_store.clone(),
+                                app_state.languages.clone(),
+                                app_state.fs.clone(),
+                                true,
+                                cx,
+                            )
+                        })?
+                    }
+                };
+                for path in paths.paths() {
+                    project
+                        .update(cx, |project, cx| {
+                            project.find_or_create_worktree(path, true, cx)
+                        })
+                        .await?;
+                }
+                anyhow::Ok(project)
+            }
+            .await;
+            let Some(project) = opened.context("opening the scope of a tab").log_err() else {
                 return;
             };
-            multi_workspace
-                .update_in(cx, |multi_workspace, window, cx| {
-                    // Opening a remote project brings it on screen: the window
-                    // goes back to its own project.
-                    if multi_workspace.workspace() != &host {
-                        multi_workspace.activate(host.clone(), None, window, cx);
-                    }
-                })
-                .log_err();
             this.update_in(cx, |this, window, cx| {
                 this.scope = Some(scope);
-                this.show_workspace(scope_workspace, window, cx);
-                if let Some(focused) = focused {
-                    window.focus(&focused, cx);
-                }
+                this.show_project(project, window, cx);
             })
             .log_err();
         }));
     }
 
-    fn show_workspace(
+    fn show_project(
         &mut self,
-        scope_workspace: Entity<Workspace>,
+        project: Entity<Project>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.pending_scope = None;
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
         let tab = cx.entity().downgrade();
         let kind = self.kind;
-        let (panel, scope_picker) = scope_workspace.update(cx, |workspace, cx| {
+        let (panel, scope_picker) = workspace.update(cx, |workspace, cx| {
+            workspace.add_scope_project(&project);
             (
-                build_panel(kind, workspace, window, cx),
-                build_scope_picker(kind, workspace, tab, window, cx),
+                build_panel(kind, workspace, project.clone(), window, cx),
+                build_scope_picker(kind, workspace, project.clone(), tab, window, cx),
             )
         });
-        if kind == PanelKind::Project
-            && scope_workspace.downgrade() != self.host
-            && let Ok(project_panel) = panel.to_any().downcast::<ProjectPanel>()
-        {
-            let host = self.host.clone();
-            project_panel.update(cx, |project_panel, _| project_panel.set_opens_in(host));
-        }
-        self._subscriptions.clear();
-        if scope_workspace.downgrade() != self.host {
-            self._subscriptions.push(cx.subscribe_in(
-                &scope_workspace,
-                window,
-                |this, scope_workspace, event, window, cx| {
-                    if let workspace::Event::ItemAdded { item } = event {
-                        this.bring_to_host(scope_workspace, item.as_ref(), window, cx);
-                    }
-                },
-            ));
-        }
+        // The new panel takes the place of the one that has the focus.
+        let had_focus = self
+            .panel
+            .panel_focus_handle(cx)
+            .contains_focused(window, cx);
         self.panel = panel;
         self.scope_picker = scope_picker;
-        self.scope_workspace = scope_workspace.downgrade();
+        self.project = project;
+        if had_focus {
+            window.focus(&self.panel.panel_focus_handle(cx), cx);
+        }
         if let Some(save) = self.save_state(cx) {
             save.detach_and_log_err(cx);
         }
         cx.emit(ItemEvent::UpdateTab);
         cx.notify();
-    }
-
-    /// The workspace of the scope is not on screen: what the person opens
-    /// from it (a diff, a file, a definition) moves to the pane on screen.
-    /// The tabs that the workspace restores, or adds without focus, stay
-    /// there.
-    fn bring_to_host(
-        &self,
-        scope_workspace: &Entity<Workspace>,
-        item: &dyn ItemHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if item.downcast::<PanelTab>().is_some()
-            || scope_workspace.read(cx).is_restoring()
-            || !item.item_focus_handle(cx).is_focused(window)
-        {
-            return;
-        }
-        let host = self.host.clone();
-        let scope_workspace = scope_workspace.downgrade();
-        let item_id = item.item_id();
-        // The pane on screen reads each of its tabs when it takes an item,
-        // this one too: the move cannot run while this tab is being updated.
-        window.defer(cx, move |window, cx| {
-            move_to_host(host, scope_workspace, item_id, window, cx);
-        });
     }
 
     fn save_state(&self, cx: &mut Context<Self>) -> Option<Task<Result<()>>> {
@@ -360,47 +325,18 @@ impl PanelTab {
     }
 }
 
-fn move_to_host(
-    host: WeakEntity<Workspace>,
-    scope_workspace: WeakEntity<Workspace>,
-    item_id: EntityId,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let (Some(host), Some(scope_workspace)) = (host.upgrade(), scope_workspace.upgrade()) else {
-        return;
-    };
-    let scope_on_screen = host
-        .read(cx)
-        .multi_workspace()
-        .and_then(|multi_workspace| multi_workspace.upgrade())
-        .is_some_and(|multi_workspace| multi_workspace.read(cx).workspace() == &scope_workspace);
-    if scope_on_screen {
-        return;
-    }
-    let Some(source) = scope_workspace
-        .read(cx)
-        .panes()
-        .iter()
-        .find(|pane| pane.read(cx).items().any(|item| item.item_id() == item_id))
-        .cloned()
-    else {
-        return;
-    };
-    let destination = host.read(cx).active_pane().clone();
-    let index = destination.read(cx).items_len();
-    workspace::move_item(&source, &destination, item_id, index, true, window, cx);
-}
-
 fn build_panel(
     kind: PanelKind,
     workspace: &mut Workspace,
+    project: Entity<Project>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Arc<dyn PanelHandle> {
     match kind {
-        PanelKind::Project => Arc::new(ProjectPanel::new(workspace, window, cx)),
-        PanelKind::Git => Arc::new(GitPanel::new_tab(workspace, window, cx)),
+        PanelKind::Project => {
+            Arc::new(ProjectPanel::new_in_project(workspace, project, window, cx))
+        }
+        PanelKind::Git => Arc::new(GitPanel::new_tab(workspace, project, window, cx)),
         PanelKind::Outline => Arc::new(OutlinePanel::new_tab(workspace, window, cx)),
         PanelKind::Terminal => {
             let panel = cx.new(|cx| TerminalPanel::new_tab(workspace, window, cx));
@@ -418,6 +354,7 @@ fn build_panel(
 fn build_scope_picker(
     kind: PanelKind,
     workspace: &mut Workspace,
+    project: Entity<Project>,
     tab: WeakEntity<PanelTab>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -432,8 +369,14 @@ fn build_scope_picker(
         });
         let multi_workspace = workspace.multi_workspace().cloned();
         cx.new(|cx| {
-            let mut title_bar =
-                TitleBar::new("panel-tab-scope", workspace, multi_workspace, window, cx);
+            let mut title_bar = TitleBar::new_in_project(
+                "panel-tab-scope",
+                workspace,
+                project,
+                multi_workspace,
+                window,
+                cx,
+            );
             title_bar.set_scope_picker(open_scope, cx);
             title_bar
         })
@@ -616,20 +559,23 @@ impl PanelTabsDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor::Editor;
     use gpui::{TestAppContext, VisualTestContext};
-    use project::FakeFs;
+    use project::{FakeFs, Fs as _};
     use serde_json::json;
     use settings::SettingsStore;
+    use std::path::Path;
     use workspace::{AppState, MultiWorkspace};
 
-    #[gpui::test]
-    async fn test_a_tab_shows_the_project_it_picks(cx: &mut TestAppContext) {
+    fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let app_state = AppState::test(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+            language_model::init(cx);
             editor::init(cx);
             project_panel::init(cx);
             workspace::init(app_state, cx);
+            git_ui::init(cx);
             crate::init(cx);
             cx.update_global::<SettingsStore, _>(|store, cx| {
                 store.update_user_settings(cx, |settings| {
@@ -637,57 +583,80 @@ mod tests {
                 });
             });
         });
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree("/window", json!({ "a.rs": "" })).await;
-        fs.insert_tree("/other", json!({ "b.rs": "" })).await;
-        let project = Project::test(fs.clone(), ["/window".as_ref()], cx).await;
+    }
+
+    async fn open_window(
+        fs: Arc<FakeFs>,
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<MultiWorkspace>,
+        Entity<Workspace>,
+        &mut VisualTestContext,
+    ) {
+        let project = Project::test(fs, ["/window".as_ref()], cx).await;
         let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = window
             .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
             .expect("the window is open");
-        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+        (window, workspace, cx)
+    }
 
-        cx.dispatch_action(OpenProjectPanel);
+    fn scoped_tab(
+        workspace: &Entity<Workspace>,
+        action: impl gpui::Action,
+        cx: &mut VisualTestContext,
+    ) -> Entity<PanelTab> {
+        cx.dispatch_action(action);
         cx.run_until_parked();
         let tab = workspace.read_with(cx, |workspace, cx| {
             workspace
                 .active_item_as::<PanelTab>(cx)
-                .expect("the project tab is active")
+                .expect("the panel tab is active")
         });
-        assert_eq!(tab.read_with(cx, |tab, _| tab.kind()), PanelKind::Project);
-        assert!(tab.read_with(cx, |tab, _| tab.scope_picker.is_some()));
-
         tab.update_in(cx, |tab, window, cx| {
             tab.set_scope(PathList::new(&[PathBuf::from("/other")]), None, window, cx)
         });
         cx.run_until_parked();
+        tab
+    }
 
-        let window_roots = window
-            .read_with(cx, |multi_workspace, cx| {
-                multi_workspace.workspace().read(cx).root_paths(cx)
+    fn assert_window_keeps_its_project(
+        window: gpui::WindowHandle<MultiWorkspace>,
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) {
+        let (on_screen, count) = window
+            .read_with(cx, |multi_workspace, _| {
+                (
+                    multi_workspace.workspace().clone(),
+                    multi_workspace.workspaces().count(),
+                )
             })
             .expect("the window is open");
-        assert_eq!(
-            window_roots,
-            vec![Arc::from(std::path::Path::new("/window"))]
-        );
-        let tab_roots = tab.read_with(cx, |tab, cx| {
-            tab.scope_workspace
-                .upgrade()
-                .map(|workspace| workspace.read(cx).root_paths(cx))
-                .unwrap_or_default()
-        });
-        assert_eq!(tab_roots, vec![Arc::from(std::path::Path::new("/other"))]);
+        assert_eq!(&on_screen, workspace, "the window keeps its own project");
+        assert_eq!(count, 1, "a scope opens no other workspace");
+    }
+
+    #[gpui::test]
+    async fn test_a_tab_opens_the_files_of_its_scope_in_the_pane_on_screen(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/window", json!({ "a.rs": "" })).await;
+        fs.insert_tree("/other", json!({ "b.rs": "one" })).await;
+        let (window, workspace, cx) = open_window(fs.clone(), cx).await;
+
+        let tab = scoped_tab(&workspace, OpenProjectPanel, cx);
+        assert_window_keeps_its_project(window, &workspace, cx);
+        let scope_project = tab.read_with(cx, |tab, _| tab.project().clone());
+        let window_project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        assert_ne!(scope_project, window_project);
         assert_eq!(
             tab.read_with(cx, |tab, cx| tab.tab_content_text(0, cx)),
             "Project · other"
         );
-        let scope_project = tab.read_with(cx, |tab, cx| {
-            tab.scope_workspace
-                .upgrade()
-                .map(|workspace| workspace.read(cx).project().clone())
-                .expect("the tab has a scope")
-        });
         let worktree_id = scope_project.read_with(cx, |project, cx| {
             project
                 .worktrees(cx)
@@ -695,6 +664,7 @@ mod tests {
                 .map(|worktree| worktree.read(cx).id())
                 .expect("the scope has a worktree")
         });
+
         let project_panel = tab.read_with(cx, |tab, _| {
             tab.panel_view()
                 .downcast::<ProjectPanel>()
@@ -713,119 +683,107 @@ mod tests {
         cx.dispatch_action(project_panel::Open);
         cx.run_until_parked();
 
-        let opened = workspace.read_with(cx, |workspace, cx| {
+        let editor = workspace.read_with(cx, |workspace, cx| {
             workspace
-                .active_item(cx)
-                .and_then(|item| item.project_path(cx))
+                .active_item_as::<Editor>(cx)
+                .expect("the file opens in the pane on screen")
         });
         assert_eq!(
-            opened.map(|path| (path.worktree_id, path.path)),
-            Some((worktree_id, util::rel_path::rel_path("b.rs").into())),
-            "a file of the scope opens in the pane on screen"
+            editor.read_with(cx, |editor, _| editor.project().cloned()),
+            Some(scope_project.clone()),
+            "the editor works in the project of the scope"
         );
-        let on_screen = window
-            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-            .expect("the window is open");
-        assert_eq!(on_screen, workspace, "the window keeps its own project");
+        assert_window_keeps_its_project(window, &workspace, cx);
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.select_all(&Default::default(), window, cx);
+            editor.insert("two", window, cx);
+        });
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.save_active_item(workspace::SaveIntent::Save, window, cx)
+            })
+            .await
+            .expect("the file saves");
+        cx.run_until_parked();
+        assert_eq!(
+            fs.load(Path::new("/other/b.rs"))
+                .await
+                .expect("b.rs exists"),
+            "two\n",
+            "the file saves in the project of the scope"
+        );
     }
 
     #[gpui::test]
-    async fn test_what_a_scope_opens_moves_to_the_pane_on_screen(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            let app_state = AppState::test(cx);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            editor::init(cx);
-            project_panel::init(cx);
-            workspace::init(app_state, cx);
-            git_ui::init(cx);
-            crate::init(cx);
-        });
+    async fn test_a_git_tab_opens_the_diff_of_its_scope_in_the_pane_on_screen(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/window", json!({ "a.rs": "" })).await;
-        fs.insert_tree("/other", json!({ "b.rs": "", "c.rs": "" }))
+        fs.insert_tree("/other", json!({ ".git": {}, "b.rs": "changed\n" }))
             .await;
-        let project = Project::test(fs.clone(), ["/window".as_ref()], cx).await;
-        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
-        let workspace = window
-            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-            .expect("the window is open");
-        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        fs.set_head_and_index_for_repo(
+            Path::new("/other/.git"),
+            &[("b.rs", "original\n".to_string())],
+        );
+        let (window, workspace, cx) = open_window(fs.clone(), cx).await;
 
-        cx.dispatch_action(OpenProjectPanel);
-        cx.run_until_parked();
-        let tab = workspace.read_with(cx, |workspace, cx| {
-            workspace
-                .active_item_as::<PanelTab>(cx)
-                .expect("the project tab is active")
+        let tab = scoped_tab(&workspace, OpenGitPanel, cx);
+        assert_window_keeps_its_project(window, &workspace, cx);
+        let scope_project = tab.read_with(cx, |tab, _| tab.project().clone());
+        let git_panel = tab.read_with(cx, |tab, _| {
+            tab.panel_view()
+                .downcast::<GitPanel>()
+                .expect("a git tab shows a git panel")
         });
-        tab.update_in(cx, |tab, window, cx| {
-            tab.set_scope(PathList::new(&[PathBuf::from("/other")]), None, window, cx)
-        });
-        cx.run_until_parked();
-        let scope_workspace = tab
-            .read_with(cx, |tab, _| tab.scope_workspace.upgrade())
-            .expect("the tab has a scope");
-        assert_ne!(scope_workspace, workspace);
-        let worktree_id = scope_workspace.read_with(cx, |scope_workspace, cx| {
-            scope_workspace
-                .project()
-                .read(cx)
-                .worktrees(cx)
-                .next()
-                .map(|worktree| worktree.read(cx).id())
-                .expect("the scope has a worktree")
-        });
-        let path = |name: &str| project::ProjectPath {
-            worktree_id,
-            path: util::rel_path::rel_path(name).into(),
-        };
+        assert_eq!(
+            git_panel.read_with(cx, |panel, _| panel.project().clone()),
+            scope_project
+        );
 
-        // The pane on screen holds the tab itself: the move must not read it
-        // while it is being updated.
-        scope_workspace
-            .update_in(cx, |scope_workspace, window, cx| {
-                scope_workspace.open_path(path("b.rs"), None, true, window, cx)
-            })
-            .await
-            .expect("b.rs opens");
-        cx.run_until_parked();
-        let host_paths = |cx: &mut VisualTestContext| {
-            workspace.read_with(cx, |workspace, cx| {
-                workspace
-                    .active_pane()
-                    .read(cx)
-                    .items()
-                    .filter_map(|item| item.project_path(cx))
-                    .collect::<Vec<_>>()
-            })
-        };
-        assert_eq!(host_paths(cx), vec![path("b.rs")]);
-
-        // The workspace of the scope restores its own tabs without focus.
-        scope_workspace
-            .update_in(cx, |scope_workspace, window, cx| {
-                scope_workspace.open_path(path("c.rs"), None, false, window, cx)
-            })
-            .await
-            .expect("c.rs opens");
-        cx.run_until_parked();
-        assert_eq!(host_paths(cx), vec![path("b.rs")]);
-
-        // The git panel of the scope opens its diff in the workspace of the
-        // scope.
-        scope_workspace.update_in(cx, |scope_workspace, window, cx| {
-            git_ui::project_diff::ProjectDiff::deploy_at(scope_workspace, None, window, cx)
+        workspace.update_in(cx, |workspace, window, cx| {
+            git_ui::project_diff::ProjectDiff::deploy_at_in_project(
+                workspace,
+                scope_project.clone(),
+                None,
+                window,
+                cx,
+            )
         });
         cx.run_until_parked();
-        let diff_on_screen = workspace.read_with(cx, |workspace, cx| {
+        let diff = workspace.read_with(cx, |workspace, cx| {
             workspace
                 .active_item_as::<git_ui::project_diff::ProjectDiff>(cx)
-                .is_some()
+                .expect("the diff opens in the pane on screen")
         });
-        assert!(diff_on_screen, "the diff of the scope opens on screen");
-        let on_screen = window
-            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-            .expect("the window is open");
-        assert_eq!(on_screen, workspace, "the window keeps its own project");
+        assert_eq!(
+            diff.read_with(cx, |diff, _| diff.project().clone()),
+            scope_project
+        );
+        assert_window_keeps_its_project(window, &workspace, cx);
+    }
+
+    #[gpui::test]
+    async fn test_a_scope_can_go_back_to_the_window(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/window", json!({ "a.rs": "" })).await;
+        fs.insert_tree("/other", json!({ "b.rs": "" })).await;
+        let (window, workspace, cx) = open_window(fs.clone(), cx).await;
+
+        let tab = scoped_tab(&workspace, OpenProjectPanel, cx);
+        tab.update_in(cx, |tab, window, cx| {
+            tab.set_scope(PathList::new(&[PathBuf::from("/window")]), None, window, cx)
+        });
+        cx.run_until_parked();
+        let window_project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        assert_eq!(
+            tab.read_with(cx, |tab, _| tab.project().clone()),
+            window_project
+        );
+        assert_eq!(tab.read_with(cx, |tab, _| tab.scope().cloned()), None);
+        assert_window_keeps_its_project(window, &workspace, cx);
     }
 }

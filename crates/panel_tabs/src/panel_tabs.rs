@@ -12,7 +12,7 @@ use db::{
 use debugger_ui::debugger_panel::DebugPanel;
 use git_ui::git_panel::GitPanel;
 use gpui::{
-    AnyView, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    AnyView, App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task,
     WeakEntity, Window, div,
 };
@@ -28,8 +28,8 @@ use title_bar::TitleBar;
 use ui::{Icon, IconName, prelude::*};
 use util::{ResultExt as _, path_list::PathList};
 use workspace::{
-    ItemId, OpenMode, OpenScope, SerializableItem, Workspace, WorkspaceDb, WorkspaceId,
-    delete_unloaded_items,
+    ItemId, MultiWorkspace, OpenMode, OpenScope, SerializableItem, Workspace, WorkspaceDb,
+    WorkspaceId, delete_unloaded_items,
     dock::{Panel as _, PanelHandle},
     item::{Item, ItemEvent, ItemHandle},
 };
@@ -215,22 +215,40 @@ impl PanelTab {
             self.show_workspace(existing, window, cx);
             return;
         }
-        let open = multi_workspace.update(cx, |multi_workspace, cx| {
-            let host = host.clone();
-            multi_workspace.find_or_create_workspace(
-                paths,
-                remote,
+        // A new workspace takes the focus of the window, but the person stays
+        // on this tab.
+        let focused = window.focused(cx);
+        let open: Task<Result<Entity<Workspace>>> = if remote.is_none() {
+            // The open of the title bar would bring a project that the window
+            // already holds on screen: the tab opens it in the background.
+            let opening = Workspace::new_local(
+                paths.paths().to_vec(),
+                host.read(cx).app_state().clone(),
+                window.window_handle().downcast::<MultiWorkspace>(),
                 None,
-                move |options, window, cx| {
-                    remote_connection::connect_with_modal(&host, options, window, cx)
-                },
                 None,
                 OpenMode::Add,
-                None,
-                window,
                 cx,
-            )
-        });
+            );
+            cx.spawn(async move |_, _| Ok(opening.await?.workspace))
+        } else {
+            multi_workspace.update(cx, |multi_workspace, cx| {
+                let host = host.clone();
+                multi_workspace.find_or_create_workspace(
+                    paths,
+                    remote,
+                    None,
+                    move |options, window, cx| {
+                        remote_connection::connect_with_modal(&host, options, window, cx)
+                    },
+                    None,
+                    OpenMode::Add,
+                    None,
+                    window,
+                    cx,
+                )
+            })
+        };
         self.pending_scope = Some(cx.spawn_in(window, async move |this, cx| {
             let opened = open.await;
             remote_connection::dismiss_connection_modal(&host, cx);
@@ -250,6 +268,9 @@ impl PanelTab {
             this.update_in(cx, |this, window, cx| {
                 this.scope = Some(scope);
                 this.show_workspace(scope_workspace, window, cx);
+                if let Some(focused) = focused {
+                    window.focus(&focused, cx);
+                }
             })
             .log_err();
         }));
@@ -284,7 +305,7 @@ impl PanelTab {
                 window,
                 |this, scope_workspace, event, window, cx| {
                     if let workspace::Event::ItemAdded { item } = event {
-                        this.bring_to_host(scope_workspace.clone(), item.boxed_clone(), window, cx);
+                        this.bring_to_host(scope_workspace, item.as_ref(), window, cx);
                     }
                 },
             ));
@@ -299,45 +320,30 @@ impl PanelTab {
         cx.notify();
     }
 
-    /// The workspace of the scope is not on screen: what its panels open
-    /// (a diff, a file, a definition) moves to the pane on screen.
+    /// The workspace of the scope is not on screen: what the person opens
+    /// from it (a diff, a file, a definition) moves to the pane on screen.
+    /// The tabs that the workspace restores, or adds without focus, stay
+    /// there.
     fn bring_to_host(
-        &mut self,
-        scope_workspace: Entity<Workspace>,
-        item: Box<dyn ItemHandle>,
+        &self,
+        scope_workspace: &Entity<Workspace>,
+        item: &dyn ItemHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.defer_in(window, move |this, window, cx| {
-            let Some(host) = this.host.upgrade() else {
-                return;
-            };
-            let scope_on_screen = host
-                .read(cx)
-                .multi_workspace()
-                .and_then(|multi_workspace| multi_workspace.upgrade())
-                .is_some_and(|multi_workspace| {
-                    multi_workspace.read(cx).workspace() == &scope_workspace
-                });
-            if scope_on_screen {
-                return;
-            }
-            let Some(pane) = scope_workspace
-                .read(cx)
-                .panes()
-                .iter()
-                .find(|pane| pane.read(cx).index_for_item(item.as_ref()).is_some())
-                .cloned()
-            else {
-                return;
-            };
-            pane.update(cx, |pane, cx| {
-                pane.remove_item(item.item_id(), false, false, window, cx);
-            });
-            let host_pane = host.read(cx).active_pane().clone();
-            host_pane.update(cx, |pane, cx| {
-                pane.add_item(item, true, true, None, window, cx);
-            });
+        if item.downcast::<PanelTab>().is_some()
+            || scope_workspace.read(cx).is_restoring()
+            || !item.item_focus_handle(cx).is_focused(window)
+        {
+            return;
+        }
+        let host = self.host.clone();
+        let scope_workspace = scope_workspace.downgrade();
+        let item_id = item.item_id();
+        // The pane on screen reads each of its tabs when it takes an item,
+        // this one too: the move cannot run while this tab is being updated.
+        window.defer(cx, move |window, cx| {
+            move_to_host(host, scope_workspace, item_id, window, cx);
         });
     }
 
@@ -352,6 +358,38 @@ impl PanelTab {
         let db = PanelTabsDb::global(cx);
         Some(cx.background_spawn(async move { db.save_tab(item_id, workspace_id, json).await }))
     }
+}
+
+fn move_to_host(
+    host: WeakEntity<Workspace>,
+    scope_workspace: WeakEntity<Workspace>,
+    item_id: EntityId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (Some(host), Some(scope_workspace)) = (host.upgrade(), scope_workspace.upgrade()) else {
+        return;
+    };
+    let scope_on_screen = host
+        .read(cx)
+        .multi_workspace()
+        .and_then(|multi_workspace| multi_workspace.upgrade())
+        .is_some_and(|multi_workspace| multi_workspace.read(cx).workspace() == &scope_workspace);
+    if scope_on_screen {
+        return;
+    }
+    let Some(source) = scope_workspace
+        .read(cx)
+        .panes()
+        .iter()
+        .find(|pane| pane.read(cx).items().any(|item| item.item_id() == item_id))
+        .cloned()
+    else {
+        return;
+    };
+    let destination = host.read(cx).active_pane().clone();
+    let index = destination.read(cx).items_len();
+    workspace::move_item(&source, &destination, item_id, index, true, window, cx);
 }
 
 fn build_panel(
@@ -685,6 +723,106 @@ mod tests {
             Some((worktree_id, util::rel_path::rel_path("b.rs").into())),
             "a file of the scope opens in the pane on screen"
         );
+        let on_screen = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the window is open");
+        assert_eq!(on_screen, workspace, "the window keeps its own project");
+    }
+
+    #[gpui::test]
+    async fn test_what_a_scope_opens_moves_to_the_pane_on_screen(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            project_panel::init(cx);
+            workspace::init(app_state, cx);
+            git_ui::init(cx);
+            crate::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/window", json!({ "a.rs": "" })).await;
+        fs.insert_tree("/other", json!({ "b.rs": "", "c.rs": "" }))
+            .await;
+        let project = Project::test(fs.clone(), ["/window".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the window is open");
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+        cx.dispatch_action(OpenProjectPanel);
+        cx.run_until_parked();
+        let tab = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_item_as::<PanelTab>(cx)
+                .expect("the project tab is active")
+        });
+        tab.update_in(cx, |tab, window, cx| {
+            tab.set_scope(PathList::new(&[PathBuf::from("/other")]), None, window, cx)
+        });
+        cx.run_until_parked();
+        let scope_workspace = tab
+            .read_with(cx, |tab, _| tab.scope_workspace.upgrade())
+            .expect("the tab has a scope");
+        assert_ne!(scope_workspace, workspace);
+        let worktree_id = scope_workspace.read_with(cx, |scope_workspace, cx| {
+            scope_workspace
+                .project()
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .map(|worktree| worktree.read(cx).id())
+                .expect("the scope has a worktree")
+        });
+        let path = |name: &str| project::ProjectPath {
+            worktree_id,
+            path: util::rel_path::rel_path(name).into(),
+        };
+
+        // The pane on screen holds the tab itself: the move must not read it
+        // while it is being updated.
+        scope_workspace
+            .update_in(cx, |scope_workspace, window, cx| {
+                scope_workspace.open_path(path("b.rs"), None, true, window, cx)
+            })
+            .await
+            .expect("b.rs opens");
+        cx.run_until_parked();
+        let host_paths = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .items()
+                    .filter_map(|item| item.project_path(cx))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(host_paths(cx), vec![path("b.rs")]);
+
+        // The workspace of the scope restores its own tabs without focus.
+        scope_workspace
+            .update_in(cx, |scope_workspace, window, cx| {
+                scope_workspace.open_path(path("c.rs"), None, false, window, cx)
+            })
+            .await
+            .expect("c.rs opens");
+        cx.run_until_parked();
+        assert_eq!(host_paths(cx), vec![path("b.rs")]);
+
+        // The git panel of the scope opens its diff in the workspace of the
+        // scope.
+        scope_workspace.update_in(cx, |scope_workspace, window, cx| {
+            git_ui::project_diff::ProjectDiff::deploy_at(scope_workspace, None, window, cx)
+        });
+        cx.run_until_parked();
+        let diff_on_screen = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_item_as::<git_ui::project_diff::ProjectDiff>(cx)
+                .is_some()
+        });
+        assert!(diff_on_screen, "the diff of the scope opens on screen");
         let on_screen = window
             .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
             .expect("the window is open");
